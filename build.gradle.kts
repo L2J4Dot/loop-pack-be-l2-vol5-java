@@ -82,6 +82,16 @@ subprojects {
         useJUnitPlatform()
         systemProperty("user.timezone", "Asia/Seoul")
         systemProperty("spring.profiles.active", "test")
+        systemProperty("api.version", "1.44")
+        environment("DOCKER_API_VERSION", "1.44")
+        if (System.getenv("DOCKER_HOST") != null) {
+            environment("DOCKER_HOST", System.getenv("DOCKER_HOST"))
+        } else {
+            val userDockerSock = file("${System.getProperty("user.home")}/.docker/run/docker.sock")
+            if (userDockerSock.exists()) {
+                environment("DOCKER_HOST", "unix://${userDockerSock.absolutePath}")
+            }
+        }
         jvmArgs("-Xshare:off")
     }
 
