@@ -1,21 +1,22 @@
 package com.loopers.application.brand;
 
 import com.loopers.application.brand.port.BrandRepository;
-import com.loopers.domain.brand.BrandId;
+import com.loopers.application.product.port.ProductRepository;
 import com.loopers.domain.brand.Brand;
+import com.loopers.domain.brand.BrandId;
+import com.loopers.domain.common.RuleViolationException;
+import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class BrandApplicationService {
     private final BrandRepository brandRepository;
+    private final ProductRepository productRepository;
 
-    private final com.loopers.application.product.port.ProductRepository products;
-
-    public BrandApplicationService(BrandRepository brandRepository,
-        com.loopers.application.product.port.ProductRepository products) {
-        this.products = products;
+    public BrandApplicationService(BrandRepository brandRepository, ProductRepository productRepository) {
         this.brandRepository = brandRepository;
+        this.productRepository = productRepository;
     }
 
     @Transactional
@@ -33,16 +34,18 @@ public class BrandApplicationService {
     @Transactional
     public void delete(long id) {
         Brand brand = brandRepository.findByIdForUpdate(new BrandId(id)).orElseThrow(BrandNotFoundException::new);
-        if (brand.isDeleted()) { return; }
-        if (products.existsActiveByBrandId(brand.getId())) {
-            throw new com.loopers.domain.common.RuleViolationException("미삭제 상품이 연결된 브랜드는 삭제할 수 없습니다.");
+        if (brand.isDeleted()) {
+            return;
+        }
+        if (productRepository.existsActiveByBrandId(brand.getId())) {
+            throw new RuleViolationException("미삭제 상품이 연결된 브랜드는 삭제할 수 없습니다.");
         }
         brand.delete();
         brandRepository.save(brand);
     }
 
     @Transactional(readOnly = true)
-    public java.util.List<AdminBrandResult> list(int page, int size) {
+    public List<AdminBrandResult> list(int page, int size) {
         return brandRepository.findPage(page, size).stream().map(AdminBrandResult::from).toList();
     }
 
