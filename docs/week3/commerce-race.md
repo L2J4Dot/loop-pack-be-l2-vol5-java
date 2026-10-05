@@ -381,7 +381,7 @@ Brand·Product·Like·Point·Order는 각각 애그리거트 루트다. 내부 �
 - **시작점:** Controller가 호출하는 ApplicationService 공개 메서드다. 서비스는 Spring bean으로 주입되어 호출이 프록시를 거친다. 같은 객체의 다른 `@Transactional` 메서드를 호출해 경계를 만들지 않는다.
 - **선언:** `Order`·`Product`·`PointApplicationService`는 클래스 단위, `BrandApplicationService`는 변경 메서드 단위 `@Transactional`이다. 영속 어댑터에도 선언이 있지만 전파가 REQUIRED라 서비스 트랜잭션에 참여한다. 어댑터를 서비스 밖에서 직접 호출하면 저장마다 따로 commit되므로 변경은 항상 서비스 메서드에서 시작한다. `REQUIRES_NEW`·`NESTED`는 부분 commit을 만들므로 쓰지 않는다.
 - **rollback:** 업무 예외(`RuleViolationException`·`InvalidValueException`·`*NotFoundException`)와 잠금 실패 예외는 모두 RuntimeException이다. 서비스 안에서 catch 후 정상 반환하지 않고 밖으로 전달해 전체를 rollback한다.
-- **JPA와 JdbcTemplate:** 상품·주문·브랜드는 JPA, 포인트는 JdbcTemplate을 쓴다. 같은 DataSource라 JPA 트랜잭션 관리자가 묶은 커넥션에 JdbcTemplate도 참여한다고 판단하며, 주문 중간 실패 테스트로 확인한다.
+- **JPA와 JdbcTemplate:** 상품·주문·브랜드는 JPA, 포인트는 JdbcTemplate을 쓴다. 같은 DataSource라 JPA 트랜잭션 관리자가 묶은 커넥션에 JdbcTemplate도 참여하며, 주문 중간 실패 테스트(`OrderTransactionTest`)로 포인트 UPDATE까지 rollback되는 것을 확인했다.
 - **flush:** JPA 변경은 commit 직전이나 쿼리 전에, JdbcTemplate UPDATE는 즉시 DB로 나간다. rollback 테스트는 실패 직전에 flush해 실제 변경 SQL이 나간 상태를 만든다.
 
 | 흐름 | 호출 경로 (→ 는 프록시를 거치는 bean 호출) | 경계 |
@@ -505,7 +505,7 @@ Brand·Product·Like·Point·Order는 각각 애그리거트 루트다. 내부 �
 
 미확인 사항:
 
-- JPA와 JdbcTemplate의 같은 트랜잭션 참여, 세션 변수 잠금 대기 시간 적용은 `OrderTransactionTest`·`LockTimeoutTest`로 확인 예정이다.
+- (확인됨) JPA와 JdbcTemplate의 같은 트랜잭션 참여는 `OrderTransactionTest`, 세션 변수 잠금 대기 시간 3초 적용은 `LockTimeoutTest`로 확인했다.
 - 잠금 순서 분석은 코드 검토 결과이며 교착이 없다는 실험 증거는 아니다.
 - 로컬 검증의 MySQL은 Ubuntu 패키지로 만든 8.0 이미지라 공식 `mysql:8.0`(맥·CI)에서도 최종 확인한다.
 
