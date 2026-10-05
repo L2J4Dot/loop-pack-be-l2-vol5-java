@@ -4,7 +4,7 @@ import com.loopers.application.brand.port.BrandRepository;
 import com.loopers.application.product.port.ProductRepository;
 import com.loopers.domain.brand.Brand;
 import com.loopers.domain.brand.BrandId;
-import com.loopers.domain.common.RuleViolationException;
+import com.loopers.domain.product.Product;
 import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,12 +33,14 @@ public class BrandApplicationService {
 
     @Transactional
     public void delete(long id) {
+        // 잠금 순서: 브랜드 → 상품 ID 오름차순. 상품 생성도 브랜드 행을 먼저 잠그므로 삭제 중 같은 브랜드 상품이 추가되지 않는다.
         Brand brand = brandRepository.findByIdForUpdate(new BrandId(id)).orElseThrow(BrandNotFoundException::new);
         if (brand.isDeleted()) {
             return;
         }
-        if (productRepository.existsActiveByBrandId(brand.getId())) {
-            throw new RuleViolationException("미삭제 상품이 연결된 브랜드는 삭제할 수 없습니다.");
+        for (Product product : productRepository.findActiveByBrandIdForUpdate(brand.getId())) {
+            product.delete();
+            productRepository.save(product);
         }
         brand.delete();
         brandRepository.save(brand);

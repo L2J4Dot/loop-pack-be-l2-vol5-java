@@ -53,8 +53,18 @@ public class ProductPersistenceAdapter implements ProductRepository {
     }
 
     @Override
-    public boolean existsActiveByBrandId(BrandId id) {
-        return productJpaRepository.existsByBrandIdAndDeletedFalse(id.value());
+    @Transactional
+    public List<Product> findActiveByBrandIdForUpdate(BrandId brandId) {
+        // products.brand_id에는 인덱스가 없어 brand_id 조건으로 바로 FOR UPDATE를 걸면 스캔한 다른 브랜드 상품 행까지 잠긴다.
+        // 대상 ID만 잠금 없이 조회한 뒤 기본 키로 잠근다. 호출 전 브랜드 행을 잠가 두므로 그 사이 같은 브랜드 상품은 생기지 않는다.
+        List<Long> activeIds = productJpaRepository.findActiveIdsByBrandId(brandId.value());
+        if (activeIds.isEmpty()) {
+            return List.of();
+        }
+        return productJpaRepository.findAllByIdInForUpdate(activeIds).stream()
+            .filter(entity -> !entity.isDeleted())
+            .map(this::toDomain)
+            .toList();
     }
 
     @Override
