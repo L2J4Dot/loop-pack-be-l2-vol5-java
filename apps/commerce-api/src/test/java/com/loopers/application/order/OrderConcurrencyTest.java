@@ -101,12 +101,13 @@ class OrderConcurrencyTest {
     }
 
     @Test
-    @DisplayName("잔액 10,000원 사용자가 4,000원 주문 3건을 동시에 확정하면 2건만 성공하고 1건은 잔액 부족으로 거절되며 거절된 주문의 재고는 남는다")
+    @DisplayName("잔액 10,000원 사용자가 서로 다른 상품의 4,000원 주문 3건을 동시에 확정하면 2건만 결제되고 거절된 주문과 재고는 유지된다")
     void protectsSameUserBalanceUnderContention() throws Exception {
-        long productId = productApplicationService.create(brandId, "4천원 상품", 4000, 10).id();
         pointApplicationService.charge(1, 10000);
         List<OrderResult> drafts = new ArrayList<>();
         for (int i = 0; i < 3; i++) {
+            // 상품 잠금에서 먼저 직렬화되지 않도록 주문마다 다른 상품을 사용해 같은 포인트 행에서 경쟁하게 한다.
+            long productId = productApplicationService.create(brandId, "4천원 상품 " + i, 4000, 10).id();
             drafts.add(orderApplicationService.create(1, List.of(new OrderApplicationService.ItemRequest(productId, 1))));
         }
 
@@ -125,13 +126,30 @@ class OrderConcurrencyTest {
             .extracting(Outcome::message)
             .containsOnly("잔액이 부족합니다.");
 
-        long confirmedCount = drafts.stream()
+        List<OrderResult> afterRace = drafts.stream()
             .map(draft -> orderApplicationService.getMyOrder(1, draft.id()))
-            .filter(order -> order.status().equals("CONFIRMED"))
-            .count();
-        assertThat(confirmedCount).isEqualTo(2);
-        assertThat(pointApplicationService.balance(1)).isEqualTo(10000 - 2 * 4000).isEqualTo(2000);
-        assertThat(productApplicationService.getAdminProduct(productId).stock()).isEqualTo(10 - confirmedCount);
+            .toList();
+        // outcomes는 제출 순서를 유지하므로 요청 결과를 같은 순서의 주문·상품 DB 상태와 대조한다.
+        for (int i = 0; i < afterRace.size(); i++) {
+            OrderResult order = afterRace.get(i);
+            OrderResult.Item item = order.items().get(0);
+            if (outcomes.get(i).result() == Result.SUCCESS) {
+                assertThat(order.status()).isEqualTo("CONFIRMED");
+                assertThat(order.paymentResult()).isEqualTo("SUCCESS");
+                assertThat(order.paidAmount()).isEqualTo(4000);
+                assertThat(productApplicationService.getAdminProduct(item.productId()).stock())
+                    .isEqualTo(10 - item.quantity()).isEqualTo(9);
+            } else {
+                assertThat(order).isEqualTo(drafts.get(i));
+                assertThat(order.status()).isEqualTo("DRAFT");
+                assertThat(order.paymentResult()).isEqualTo("NOT_PAID");
+                assertThat(order.paidAmount()).isZero();
+                assertThat(productApplicationService.getAdminProduct(item.productId()).stock()).isEqualTo(10);
+            }
+        }
+        assertThat(afterRace).filteredOn(order -> order.status().equals("CONFIRMED")).hasSize(2);
+        long paidTotal = afterRace.stream().mapToLong(OrderResult::paidAmount).sum();
+        assertThat(pointApplicationService.balance(1)).isEqualTo(10000 - paidTotal).isEqualTo(2000);
     }
 
     @Test
