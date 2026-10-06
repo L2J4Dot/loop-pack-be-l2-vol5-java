@@ -76,6 +76,15 @@ class BrandApiIntegrationTest {
     }
 
     @Test
+    @DisplayName("없는 브랜드를 관리자가 삭제하면 404로 거절한다")
+    void rejectsMissingBrandDeletion() throws Exception {
+        mvc.perform(delete("/api-admin/v1/brands/{id}", 999_999L).with(user("admin").roles("ADMIN")).with(csrf()))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.meta.result").value("FAIL"));
+        assertThat(brands.count()).isZero();
+    }
+
+    @Test
     @DisplayName("일반 사용자와 미식별 요청의 브랜드 삭제는 유효한 CSRF가 있어도 403이며 브랜드와 상품을 바꾸지 않는다")
     void rejectsNonAdminBrandDeletion() throws Exception {
         long brandId = service.create("브랜드").id().value();

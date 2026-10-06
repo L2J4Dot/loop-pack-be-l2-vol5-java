@@ -5,6 +5,8 @@ import com.loopers.application.product.ProductApplicationService;
 import com.loopers.utils.DatabaseCleanUp;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,14 +61,23 @@ class LostUpdateControlTest {
     @Test
     @DisplayName("두 트랜잭션이 잠금 없이 같은 재고 5를 읽고 각자 계산한 4를 저장하면 둘 다 성공해도 최종 재고는 4로 한 건이 유실된다")
     void reproducesLostUpdateWithoutLock() throws Exception {
-        CyclicBarrier bothRead = new CyclicBarrier(2);
+        Map<Integer, Integer> readStocksByWorker = new ConcurrentHashMap<>();
+        // 두 트랜잭션이 모두 5를 읽은 것을 확인한 뒤에만 장벽을 열어 쓰기를 허용한다. 확인에 실패하면 장벽이 깨져 쓰기 없이 끝난다.
+        CyclicBarrier bothRead = new CyclicBarrier(2, () -> {
+            if (readStocksByWorker.size() != 2
+                || !readStocksByWorker.values().stream().allMatch(stock -> stock == INITIAL_STOCK)) {
+                throw new IllegalStateException("두 트랜잭션이 모두 초기 재고를 읽지 못했습니다: " + readStocksByWorker);
+            }
+        });
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             List<Future<Integer>> futures = new ArrayList<>();
             for (int i = 0; i < 2; i++) {
+                int worker = i;
                 futures.add(executor.submit(() -> transactionTemplate.execute(status -> {
                     Integer readStock = jdbcTemplate.queryForObject("select stock from products where id = ?", Integer.class,
                         productId);
+                    readStocksByWorker.put(worker, readStock);
                     awaitBarrier(bothRead);
                     int updatedRows = jdbcTemplate.update("update products set stock = ? where id = ?", readStock - 1, productId);
                     assertThat(updatedRows).isEqualTo(1);
