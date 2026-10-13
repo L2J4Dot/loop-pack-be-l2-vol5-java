@@ -5,7 +5,8 @@
 #   scripts/perf/run.sh seed              # 측정용 DB(loopers_perf)에 대량 데이터 생성
 #   scripts/perf/run.sh bench baseline    # 측정 결과를 docs/week4/query-performance-raw.md 끝에 섹션으로 추가
 #   scripts/perf/run.sh bench after-index # 개선 후 같은 방식으로 측정해 비교
-#   scripts/perf/run.sh compare baseline after-index  # 두 측정의 쿼리 결과 스냅샷 비교
+#   scripts/perf/run.sh api-bench baseline            # 앱을 loopers_perf로 띄워 API 요청 단위 측정
+#   scripts/perf/run.sh compare baseline after-index  # 두 측정의 결과 스냅샷(SQL·API) 비교
 #
 # 환경 변수
 #   PERF_DB      측정용 DB 이름 (기본 loopers_perf, 애플리케이션 local DB와 분리)
@@ -15,6 +16,8 @@
 #   QUERY_TIMEOUTS  쿼리별 제한 시간. 예) "Q6_likes_all=300000 Q7_likes_brand=300000"
 #   QUERY_RUNS      쿼리별 측정 횟수. 예) "Q6_likes_all=1"
 #   MYSQL_CMD    mysql 클라이언트 명령 (기본: compose의 mysql 컨테이너에서 root로 실행)
+#   api-bench    APP_JAR(없으면 bootJar 빌드) APP_PORT(8080) APP_DB_USER/APP_DB_PASSWORD(root/root)
+#                API_WARMUP(20) API_REQUESTS(200) API_SLOW_MS(30000, 첫 요청이 넘으면 워밍업 1회 + 측정 3회)
 #   seed 규모    BRANDS(200) PRODUCTS(100000) LIKES(1000000) USERS(50000)
 #   seed 부하    CHUNK(100000, 청크마다 커밋) CHUNK_SLEEP(0, 청크 사이 쉬는 초)
 #   예) PRODUCTS=10000000 LIKES=10000000 CHUNK_SLEEP=0.2 scripts/perf/run.sh seed
@@ -30,6 +33,17 @@ SLOW_RUNS="${SLOW_RUNS:-3}"
 QUERY_TIMEOUTS="${QUERY_TIMEOUTS:-}"
 QUERY_RUNS="${QUERY_RUNS:-}"
 RESULTS_DIR="$ROOT_DIR/docs/week4/perf-results"
+APP_JAR="${APP_JAR:-}"
+APP_PORT="${APP_PORT:-8080}"
+APP_DB_USER="${APP_DB_USER:-root}"
+APP_DB_PASSWORD="${APP_DB_PASSWORD:-root}"
+APP_START_TIMEOUT="${APP_START_TIMEOUT:-180}"
+API_USER_ID="${API_USER_ID:-1}"
+API_WARMUP="${API_WARMUP:-20}"
+API_REQUESTS="${API_REQUESTS:-200}"
+API_SLOW_MS="${API_SLOW_MS:-30000}"
+API_SLOW_WARMUP="${API_SLOW_WARMUP:-1}"
+API_SLOW_REQUESTS="${API_SLOW_REQUESTS:-3}"
 BRANDS="${BRANDS:-200}"
 PRODUCTS="${PRODUCTS:-100000}"
 LIKES="${LIKES:-1000000}"
@@ -297,10 +311,228 @@ compare() {
     [ "$differ" -eq 0 ]
 }
 
+# ---------------------------------------------------------------- api-bench
+# 측정 대상 요청: 이름<TAB>설명<TAB>경로
+API_REQUESTS_LIST="R1\t브랜드 1 가격순 1페이지 (과제 측정 대상)\t/api/v1/products?brandId=1&sort=price_asc&page=0&size=20
+R2\t브랜드 200 가격순 1페이지\t/api/v1/products?brandId=200&sort=price_asc&page=0&size=20
+R3\t브랜드 200 좋아요순 1페이지\t/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20
+R4\t상품 1 상세\t/api/v1/products/1"
+
+APP_PID=""
+
+stop_app() {
+    if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+        echo "[api-bench] 앱 종료 (pid $APP_PID)"
+        kill "$APP_PID" 2>/dev/null || true
+        local i
+        for ((i = 0; i < 30; i++)); do
+            kill -0 "$APP_PID" 2>/dev/null || break
+            sleep 1
+        done
+        kill -9 "$APP_PID" 2>/dev/null || true
+    fi
+    APP_PID=""
+}
+
+app_args() {
+    # 설정 파일은 바꾸지 않고 local 프로필 위에 명령행 인자로만 덮어쓴다.
+    #   ddl-auto=none: local 기본값 create면 기동 시 측정 DB 테이블이 지워진다
+    #   username/password: compose의 application 계정은 loopers DB 권한만 있어 loopers_perf에 접근하지 못한다
+    #   show-sql=false: SQL 콘솔 출력 비용을 측정에서 뺀다
+    echo "--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false"
+    echo "--datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/$PERF_DB"
+    echo "--datasource.mysql-jpa.main.username=$APP_DB_USER --datasource.mysql-jpa.main.password=$APP_DB_PASSWORD"
+    echo "--server.port=$APP_PORT"
+}
+
+start_app() {
+    local log="$1" jar="$APP_JAR" i code
+    if (echo > "/dev/tcp/127.0.0.1/$APP_PORT") 2>/dev/null; then
+        echo "[api-bench] $APP_PORT 포트가 이미 사용 중이다. 실행 중인 앱을 끄거나 APP_PORT를 바꿔야 한다." >&2
+        exit 1
+    fi
+    if [ -z "$jar" ]; then
+        echo "[api-bench] bootJar 빌드"
+        (cd "$ROOT_DIR" && ./gradlew :apps:commerce-api:bootJar -x test -q)
+        jar="$(ls -t "$ROOT_DIR"/apps/commerce-api/build/libs/*.jar | grep -v -- "-plain" | head -1)"
+    fi
+    echo "[api-bench] 앱 기동: ${jar#$ROOT_DIR/}"
+    # shellcheck disable=SC2046
+    java -jar "$jar" $(app_args) > "$log" 2>&1 &
+    APP_PID=$!
+    trap stop_app EXIT INT TERM
+    for ((i = 0; i < APP_START_TIMEOUT; i++)); do
+        if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo "[api-bench] 앱이 기동 중 종료됐다. 로그 마지막 부분:" >&2
+            tail -30 "$log" >&2
+            exit 1
+        fi
+        code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-USER-ID: $API_USER_ID" \
+            "http://127.0.0.1:$APP_PORT/api/v1/products/1" || true)"
+        if [ "$code" != "000" ]; then
+            echo "[api-bench] 앱 준비 완료 (${i}초, 첫 응답 $code)"
+            return
+        fi
+        sleep 1
+    done
+    echo "[api-bench] ${APP_START_TIMEOUT}초 안에 앱이 응답하지 않았다." >&2
+    exit 1
+}
+
+# 요청 1회: 본문은 $2 파일에, "상태코드 초" 를 출력한다
+one_request() {
+    local out
+    out="$(curl -s -o "$2" -w '%{http_code} %{time_total}' --max-time 900 -H "X-USER-ID: $API_USER_ID" \
+        "http://127.0.0.1:$APP_PORT$1")" || true
+    echo "${out:-000 0}"
+}
+
+percentiles_ms() {
+    # 입력: 초 단위 값 목록 / 출력: p50 p95 p99 최대 (ms, nearest-rank)
+    sort -n | awk '{ v[NR] = $1 * 1000 } END {
+        if (NR == 0) { print "-\t-\t-\t-"; exit }
+        split("0.50 0.95 0.99", q, " ")
+        for (k = 1; k <= 3; k++) { r = int(q[k] * NR); if (r < q[k] * NR) r++; if (r < 1) r = 1; p[k] = v[r] }
+        printf "%.1f\t%.1f\t%.1f\t%.1f\n", p[1], p[2], p[3], v[NR]
+    }'
+}
+
+# 응답 본문(JSON)에서 상품별 id·price·likeCount를 순서대로 뽑는다 (목록·상세 공통)
+response_snapshot() {
+    printf 'id\tprice\tlikeCount\n'
+    { grep -oE '"(id|price|likeCount)"[[:space:]]*:[[:space:]]*[0-9]+' "$1" || true; } | tr -d ' ' | awk -F: '
+        $1 == "\"id\"" { id = $2 }
+        $1 == "\"price\"" { price = $2 }
+        $1 == "\"likeCount\"" { print id "\t" price "\t" $2 }
+    '
+}
+
+perf_schema() {
+    # 측정용 클라이언트는 기본 DB 없이 접속하므로 SCHEMA_NAME이 NULL이다. 앱 커넥션만 $PERF_DB로 집계된다.
+    mysql_db --batch --skip-column-names
+}
+
+api_bench() {
+    local label="${1:?측정 이름을 지정하세요. 예: baseline}"
+    local doc="$ROOT_DIR/docs/week4/query-performance-raw.md"
+    local out_dir="$RESULTS_DIR/$label"
+    local work log body times digests rows details
+    mkdir -p "$out_dir"
+    work="$(mktemp -d)"
+    log="$work/app.log"
+    body="$work/body.json"
+    rows="$work/rows.md"
+    details="$work/details.txt"
+    : > "$rows"
+    : > "$details"
+
+    start_app "$log"
+
+    local name desc path first code secs warm_n n i ok fail stats sql_total sql_select sql_ms failed=0
+    while IFS=$'\t' read -r name desc path; do
+        echo "[api-bench] $name $path"
+        times="$work/$name.times"
+        digests="$work/$name.digests"
+        : > "$times"
+        ok=0
+        fail=0
+
+        first="$(one_request "$path" "$body")"
+        code="${first%% *}"
+        secs="${first#* }"
+        [ "$code" = "200" ] || fail=$((fail + 1))
+        if awk -v s="$secs" -v t="$API_SLOW_MS" 'BEGIN { exit !(s * 1000 > t) }'; then
+            warm_n="$API_SLOW_WARMUP"
+            n="$API_SLOW_REQUESTS"
+        else
+            warm_n="$API_WARMUP"
+            n="$API_REQUESTS"
+        fi
+        for ((i = 1; i < warm_n; i++)); do
+            code="$(one_request "$path" "$body" | cut -d' ' -f1)"
+            [ "$code" = "200" ] || fail=$((fail + 1))
+        done
+
+        echo "TRUNCATE TABLE performance_schema.events_statements_summary_by_digest;" | perf_schema
+        for ((i = 0; i < n; i++)); do
+            first="$(one_request "$path" "$body")"
+            code="${first%% *}"
+            if [ "$code" = "200" ]; then
+                ok=$((ok + 1))
+            else
+                fail=$((fail + 1))
+            fi
+            echo "${first#* }" >> "$times"
+        done
+        echo "SELECT COUNT_STAR, ROUND(SUM_TIMER_WAIT / 1000000000, 2), LEFT(REPLACE(DIGEST_TEXT, '\`', ''), 160)
+              FROM performance_schema.events_statements_summary_by_digest
+              WHERE SCHEMA_NAME = '$PERF_DB' ORDER BY COUNT_STAR DESC, SUM_TIMER_WAIT DESC;" | perf_schema > "$digests"
+
+        response_snapshot "$body" > "$out_dir/api-$name.tsv"
+        stats="$(percentiles_ms < "$times")"
+        sql_total="$(awk -F'\t' -v n="$n" '{ c += $1 } END { printf "%.1f", c / n }' "$digests")"
+        sql_select="$(awk -F'\t' -v n="$n" 'toupper($3) ~ /^SELECT/ { c += $1 } END { printf "%.1f", c / n }' "$digests")"
+        sql_ms="$(awk -F'\t' -v n="$n" '{ t += $2 } END { printf "%.1f", t / n }' "$digests")"
+        [ "$fail" -eq 0 ] || failed=$((failed + 1))
+
+        printf "| %s | %s | \`%s\` | %s | %s | %s | %s/%s | %s | %s | %s |\n" "$name" "$desc" "$path" "$warm_n" "$n" \
+            "$(echo "$stats" | sed 's/\t/ | /g')" "$ok" "$((n))" "$sql_total" "$sql_select" "$sql_ms" >> "$rows"
+        if [ "$fail" -ne 0 ]; then
+            echo "[api-bench] $name: 200이 아닌 응답 ${fail}건 (워밍업 포함). 측정 실패로 본다." >&2
+        fi
+        {
+            echo "-- $name $path (요청 ${n}회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)"
+            cat "$digests"
+            echo
+        } >> "$details"
+    done < <(printf '%b\n' "$API_REQUESTS_LIST")
+
+    stop_app
+    trap - EXIT INT TERM
+
+    {
+        echo
+        if [ "$failed" -ne 0 ]; then
+            echo "## API 측정: $label ($(date '+%Y-%m-%d %H:%M')) — 실패: 200이 아닌 응답 포함, 비교에 쓰지 않는다"
+        else
+            echo "## API 측정: $label ($(date '+%Y-%m-%d %H:%M'))"
+        fi
+        echo
+        env_line
+        echo "- 앱: commerce-api local 프로필 + 명령행 인자 \`$(app_args | tr '\n' ' ' | sed "s/password=[^ ]*/password=***/")\`"
+        echo "- 방식: curl 순차 1개, X-USER-ID: $API_USER_ID. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank)."
+        echo "  첫 요청이 ${API_SLOW_MS}ms를 넘으면 워밍업 ${API_SLOW_WARMUP}회 + 측정 ${API_SLOW_REQUESTS}회로 줄인다."
+        echo "- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=$PERF_DB(앱 커넥션) 실행 수를 요청 수로 나눈 값"
+        echo "- 응답 스냅샷: \`docs/week4/perf-results/$label/api-*.tsv\` (마지막 응답의 id·price·likeCount)"
+        data_lines
+        echo
+        echo '| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) |'
+        echo '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+        cat "$rows"
+        echo
+        echo '<details><summary>요청별 SQL digest</summary>'
+        echo
+        echo '```text'
+        cat "$details"
+        echo '```'
+        echo
+        echo '</details>'
+    } >> "$doc"
+
+    rm -rf "$work"
+    echo
+    echo "[api-bench] 완료: docs/week4/query-performance-raw.md 에 'API 측정: $label' 섹션 추가, 스냅샷 ${out_dir#$ROOT_DIR/}/"
+    if [ "$failed" -ne 0 ]; then
+        echo "[api-bench] 200이 아닌 응답이 있는 요청이 ${failed}개다. 이 측정은 실패로 본다." >&2
+        exit 1
+    fi
+}
+
 case "${1:-}" in
     seed) seed ;;
     bench) shift; bench "$@" ;;
     compare) shift; compare "$@" ;;
+    api-bench) shift; api_bench "$@" ;;
     *)
         sed -n '2,/^set -euo/p' "$0" | sed '$d'
         exit 1
