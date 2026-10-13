@@ -1,0 +1,43 @@
+-- 측정 대상 쿼리. ProductPersistenceAdapter.search / LikePersistenceAdapter의 실제 SQL과 같은 형태를 쓴다.
+-- 형식: '-- @name 이름', '-- @desc 설명' 다음 줄에 한 줄짜리 SELECT 문 (세미콜론으로 끝냄)
+-- 브랜드 필터 값: 1 = 상품이 가장 많은 브랜드(약 7,200개), 200 = 상품이 적은 브랜드(약 250개)
+
+-- @name Q1_latest_all
+-- @desc 전체 상품 최신순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- @name Q2_latest_brand
+-- @desc 큰 브랜드(1) 최신순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- @name Q3_price_all
+-- @desc 전체 상품 가격 낮은순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.price asc, p.id desc LIMIT 20 OFFSET 0;
+
+-- @name Q4_price_brand
+-- @desc 큰 브랜드(1) 가격 낮은순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY p.price asc, p.id desc LIMIT 20 OFFSET 0;
+
+-- @name Q5_latest_deep_page
+-- @desc 전체 최신순 깊은 페이지 (page=2500, size=20)
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 50000;
+
+-- @name Q6_likes_all
+-- @desc 전체 상품 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY (SELECT count(*) FROM product_likes l WHERE l.product_id=p.id) desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- @name Q7_likes_brand
+-- @desc 큰 브랜드(1) 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY (SELECT count(*) FROM product_likes l WHERE l.product_id=p.id) desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- @name Q8_likes_small_brand
+-- @desc 작은 브랜드(200) 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=200 ORDER BY (SELECT count(*) FROM product_likes l WHERE l.product_id=p.id) desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- @name Q9_like_count_page
+-- @desc 목록 1페이지 상품 20개의 좋아요 수 일괄 집계 (countByProductIds)
+SELECT product_id, count(*) AS total FROM product_likes WHERE product_id IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20) GROUP BY product_id;
+
+-- @name Q10_like_count_detail
+-- @desc 상품 상세의 좋아요 수 (인기 상품 1)
+SELECT product_id, count(*) AS total FROM product_likes WHERE product_id IN (1) GROUP BY product_id;
