@@ -50,7 +50,9 @@
 
 **스키마.** `seed.sql`의 `CREATE TABLE`은 각 `JpaEntity`를 Hibernate가 MySQL에 매핑하는 형태와 컬럼명·타입·NULL 여부를 맞췄다
 (`Long @Id IDENTITY` → `bigint auto_increment`, `boolean` → `bit`, `Instant` → `datetime(6)`, `String(length=100)` → `varchar(100)`, 모든 컬럼 NOT NULL).
-`product_likes` 유일 제약 이름만 다르다(Hibernate는 임의 이름 `UK...`). 실제 Hibernate DDL을 생성해 대조하지는 못했다.
+`product_likes` 유일 제약 이름만 다르다(Hibernate는 임의 이름 `UK...`).
+실제 Hibernate DDL과의 대조는 `run.sh ddl-check`로 한다. 빈 임시 DB에 앱을 `ddl-auto=create`로 띄운 스키마와 `seed.sql`의 `CREATE TABLE`을 `SHOW CREATE TABLE`로 나란히 출력하고,
+컬럼(이름·타입·NULL·auto_increment)과 인덱스(유일 여부·컬럼)를 비교한다. 컬럼 순서와 유일 제약 이름은 비교에서 뺀다. 임시 DB는 끝나면 지운다.
 
 **검증.** seed 마지막에 테이블별 건수와 규칙 위반 건수(삭제 브랜드의 미삭제 상품, users에 없는 좋아요 사용자)를 출력한다. 위반은 0이어야 한다.
 
@@ -120,7 +122,9 @@ FROM perf_seq WHERE n < {limit};
 - 쿼리마다 워밍업 1회 후 `RUNS`회(기본 10) 실행한다. 첫 실행에는 디스크에서 데이터를 읽어 오는 비용이 섞이기 때문이다.
 - 워밍업이 `SLOW_MS`(기본 10초)를 넘는 느린 쿼리는 `SLOW_RUNS`회(기본 3)만 실행하고, 표에 실제 실행 횟수를 적는다. `QUERY_RUNS`로 쿼리별 횟수를 직접 정할 수도 있다.
 - 시간은 `SHOW PROFILES`의 서버 실행 시간이다. 클라이언트·네트워크 시간이 빠지므로 쿼리 자체의 비용만 비교된다.
-- 1회가 제한 시간(`TIMEOUT_MS`, 기본 30초)을 넘으면 `TIMEOUT`으로 기록하고 반복을 건너뛴다. `QUERY_TIMEOUTS`로 쿼리별 제한을 늘릴 수 있다.
+- 1회가 제한 시간(`TIMEOUT_MS`, 기본 30초)을 넘으면 `TIMEOUT`으로 기록하고 반복을 건너뛴다. `QUERY_TIMEOUTS`로 쿼리별 제한을 정한다.
+- **Q6·Q7은 제한 60초(기본 `QUERY_TIMEOUTS`)로 두고 `TIMEOUT(>60000)`을 하한값으로, `EXPLAIN`만 기록한다.** 클라우드 10만 규모에서 Q7 1회가 722초였고 Q6은 그보다 훨씬 길어 실측하지 않는다. 결과가 없으므로 스냅샷 비교도 할 수 없다.
+- **좋아요순(`likes_desc`) 결과 비교는 Q8(SQL)과 R3(API) 스냅샷으로 한다.** 둘 다 같은 정렬을 작은 브랜드(200)로 끝까지 실행하므로 결과 순서와 좋아요 수를 비교할 수 있다.
 - 쿼리마다 `EXPLAIN`(예상 계획)과 `EXPLAIN ANALYZE`(실제 실행 결과)를 함께 남긴다.
 
 ### 4.2 요청 단위 (`run.sh api-bench`)
@@ -134,6 +138,8 @@ FROM perf_seq WHERE n < {limit};
 | `--datasource.mysql-jpa.main.username/password` (기본 root) | compose의 `application` 계정은 `loopers` DB 권한만 있다 |
 | `--spring.jpa.show-sql=false` | SQL 콘솔 출력 비용을 응답 시간에서 뺀다 |
 
+**측정 조건: 개선 후(after) 측정도 같은 계정(root)·같은 인자로 실행한다.** 계정이나 옵션이 다르면 연결·로깅 비용이 달라져 비교할 수 없다. 섹션에 실제 인자를 함께 기록한다.
+
 | 요청 | 경로 (`X-USER-ID: 1`) |
 | --- | --- |
 | R1 (과제 측정 대상) | `GET /api/v1/products?brandId=1&sort=price_asc&page=0&size=20` |
@@ -141,9 +147,10 @@ FROM perf_seq WHERE n < {limit};
 | R3 | `GET /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` |
 | R4 | `GET /api/v1/products/1` |
 
-- 지연: curl 순차 1개로 워밍업 20회 + 측정 200회, `time_total`의 p50·p95·p99·최대(ms). 첫 요청이 30초를 넘으면 워밍업 1회 + 측정 3회로 줄이고 표에 표본 수를 적는다.
+- 지연: curl 순차 1개로 워밍업 20회 + 측정 200회, `time_total`의 p50·p95·p99·최대(ms). 첫 요청이 5초(`API_SLOW_MS`)를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '워밍업'·'표본' 열이 요청별 실제 횟수다.
+- 데이터 보존: 앱 기동 전후로 `loopers_perf.products` 건수를 출력하고 기록한다. 시작 전 0건이면 측정하지 않고, 전후 건수가 다르면 측정 실패로 본다(인자가 빠져 `ddl-auto=create`로 뜨는 사고를 막기 위해서다).
 - 요청당 SQL 수: 측정 직전 `performance_schema.events_statements_summary_by_digest`를 비우고, 측정 후 앱 커넥션(기본 DB가 `loopers_perf`)이 실행한 문장을 digest별 실행 수·총 시간으로 집계해 요청 수로 나눈다. 측정용 mysql 클라이언트는 기본 DB 없이 접속하므로 집계에서 빠진다.
-- 워밍업을 포함한 모든 응답이 200이어야 한다. 401·500 등이 섞이면 섹션 제목에 실패를 표시하고 종료 코드 1로 끝나며, 그 측정은 비교에 쓰지 않는다.
+- 워밍업을 포함한 모든 응답이 200이어야 한다. 401·500 등이 섞이거나 데이터 건수가 바뀌면 섹션 제목에 실패를 표시하고 종료 코드 1로 끝나며, 그 측정은 비교에 쓰지 않는다.
 - 측정이 끝나거나 중간에 실패해도 띄운 앱 프로세스는 종료한다.
 
 ### 4.3 결과 스냅샷과 비교 (`run.sh compare`)
@@ -158,15 +165,12 @@ FROM perf_seq WHERE n < {limit};
 
 ```bash
 # 저장소 루트에서, docker/infra-compose.yml의 mysql·redis가 떠 있는 상태
+scripts/perf/run.sh ddl-check                          # (처음 한 번) seed 스키마가 앱 스키마와 같은지 확인
 scripts/perf/run.sh seed                               # 10만 규모 (users 5만 포함)
-QUERY_TIMEOUTS="Q6_likes_all=300000 Q7_likes_brand=300000" \
-    scripts/perf/run.sh bench baseline                  # SQL 단위. Q6·Q7은 baseline에서만 5분까지 기다린다
+scripts/perf/run.sh bench baseline                     # SQL 단위. Q6·Q7은 60초 TIMEOUT 하한값과 EXPLAIN만
 scripts/perf/run.sh api-bench baseline                 # 요청 단위 (bootJar 빌드 후 앱을 띄우고 끝나면 종료)
 scripts/perf/run.sh compare baseline after-index       # 개선 후 결과가 같은지 확인
 ```
-
-> 클라우드 10만 규모에서 Q7(브랜드 1 좋아요순)은 한 번에 722초가 걸렸다. Q6은 상품 수에 비례해 그보다 훨씬 오래 걸릴 것으로 보여, 5분 제한으로도 TIMEOUT이 될 가능성이 높다.
-> R3는 1회 약 25초라 30초 기준에 걸리지 않으면 워밍업 20회 + 측정 200회에 1시간 30분 넘게 걸릴 수 있다. 시간을 줄이려면 `API_SLOW_MS=10000`처럼 기준을 낮춘다.
 
 ## 5. 개선 전 결과와 원인
 

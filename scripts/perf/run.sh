@@ -7,17 +7,19 @@
 #   scripts/perf/run.sh bench after-index # 개선 후 같은 방식으로 측정해 비교
 #   scripts/perf/run.sh api-bench baseline            # 앱을 loopers_perf로 띄워 API 요청 단위 측정
 #   scripts/perf/run.sh compare baseline after-index  # 두 측정의 결과 스냅샷(SQL·API) 비교
+#   scripts/perf/run.sh ddl-check         # 빈 DB에 앱을 ddl-auto=create로 띄워 seed.sql 스키마와 대조
 #
 # 환경 변수
 #   PERF_DB      측정용 DB 이름 (기본 loopers_perf, 애플리케이션 local DB와 분리)
 #   RUNS         쿼리별 측정 횟수 (기본 10, 별도로 워밍업 1회)
 #   TIMEOUT_MS   쿼리 1회 제한 시간 (기본 30000). 넘으면 TIMEOUT으로 기록하고 반복 측정을 건너뛴다
 #   SLOW_MS      워밍업이 이 시간(ms)을 넘으면 느린 쿼리로 보고 SLOW_RUNS회만 측정 (기본 10000 / 3)
-#   QUERY_TIMEOUTS  쿼리별 제한 시간. 예) "Q6_likes_all=300000 Q7_likes_brand=300000"
+#   QUERY_TIMEOUTS  쿼리별 제한 시간 (기본 "Q6_likes_all=60000 Q7_likes_brand=60000": TIMEOUT 하한값과 EXPLAIN만 남긴다)
 #   QUERY_RUNS      쿼리별 측정 횟수. 예) "Q6_likes_all=1"
 #   MYSQL_CMD    mysql 클라이언트 명령 (기본: compose의 mysql 컨테이너에서 root로 실행)
 #   api-bench    APP_JAR(없으면 bootJar 빌드) APP_PORT(8080) APP_DB_USER/APP_DB_PASSWORD(root/root)
-#                API_WARMUP(20) API_REQUESTS(200) API_SLOW_MS(30000, 첫 요청이 넘으면 워밍업 1회 + 측정 3회)
+#                API_WARMUP(20) API_REQUESTS(200) API_SLOW_MS(5000, 첫 요청이 넘으면 워밍업 1회 + 측정 3회)
+#                개선 전후 비교는 같은 계정·옵션(root, show-sql=false 등 app_args)으로 측정한다
 #   seed 규모    BRANDS(200) PRODUCTS(100000) LIKES(1000000) USERS(50000)
 #   seed 부하    CHUNK(100000, 청크마다 커밋) CHUNK_SLEEP(0, 청크 사이 쉬는 초)
 #   예) PRODUCTS=10000000 LIKES=10000000 CHUNK_SLEEP=0.2 scripts/perf/run.sh seed
@@ -30,7 +32,7 @@ RUNS="${RUNS:-10}"
 TIMEOUT_MS="${TIMEOUT_MS:-30000}"
 SLOW_MS="${SLOW_MS:-10000}"
 SLOW_RUNS="${SLOW_RUNS:-3}"
-QUERY_TIMEOUTS="${QUERY_TIMEOUTS:-}"
+QUERY_TIMEOUTS="${QUERY_TIMEOUTS-Q6_likes_all=60000 Q7_likes_brand=60000}"
 QUERY_RUNS="${QUERY_RUNS:-}"
 RESULTS_DIR="$ROOT_DIR/docs/week4/perf-results"
 APP_JAR="${APP_JAR:-}"
@@ -41,7 +43,7 @@ APP_START_TIMEOUT="${APP_START_TIMEOUT:-180}"
 API_USER_ID="${API_USER_ID:-1}"
 API_WARMUP="${API_WARMUP:-20}"
 API_REQUESTS="${API_REQUESTS:-200}"
-API_SLOW_MS="${API_SLOW_MS:-30000}"
+API_SLOW_MS="${API_SLOW_MS:-5000}"
 API_SLOW_WARMUP="${API_SLOW_WARMUP:-1}"
 API_SLOW_REQUESTS="${API_SLOW_REQUESTS:-3}"
 BRANDS="${BRANDS:-200}"
@@ -322,7 +324,7 @@ APP_PID=""
 
 stop_app() {
     if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
-        echo "[api-bench] 앱 종료 (pid $APP_PID)"
+        echo "[app] 앱 종료 (pid $APP_PID)"
         kill "$APP_PID" 2>/dev/null || true
         local i
         for ((i = 0; i < 30; i++)); do
@@ -335,47 +337,49 @@ stop_app() {
 }
 
 app_args() {
-    # 설정 파일은 바꾸지 않고 local 프로필 위에 명령행 인자로만 덮어쓴다.
-    #   ddl-auto=none: local 기본값 create면 기동 시 측정 DB 테이블이 지워진다
+    # 설정 파일은 바꾸지 않고 local 프로필 위에 명령행 인자로만 덮어쓴다. 인자: [DB 이름] [ddl-auto]
+    #   ddl-auto=none: local 기본값 create면 기동 시 측정 DB 테이블이 지워진다 (ddl-check만 create로 띄운다)
     #   username/password: compose의 application 계정은 loopers DB 권한만 있어 loopers_perf에 접근하지 못한다
     #   show-sql=false: SQL 콘솔 출력 비용을 측정에서 뺀다
-    echo "--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false"
-    echo "--datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/$PERF_DB"
+    # 개선 전후 비교는 이 인자 그대로(같은 계정·옵션) 측정해야 한다.
+    local db="${1:-$PERF_DB}" ddl="${2:-none}"
+    echo "--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=$ddl --spring.jpa.show-sql=false"
+    echo "--datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/$db"
     echo "--datasource.mysql-jpa.main.username=$APP_DB_USER --datasource.mysql-jpa.main.password=$APP_DB_PASSWORD"
     echo "--server.port=$APP_PORT"
 }
 
 start_app() {
-    local log="$1" jar="$APP_JAR" i code
+    local log="$1" db="${2:-$PERF_DB}" ddl="${3:-none}" jar="$APP_JAR" i code
     if (echo > "/dev/tcp/127.0.0.1/$APP_PORT") 2>/dev/null; then
-        echo "[api-bench] $APP_PORT 포트가 이미 사용 중이다. 실행 중인 앱을 끄거나 APP_PORT를 바꿔야 한다." >&2
+        echo "[app] $APP_PORT 포트가 이미 사용 중이다. 실행 중인 앱을 끄거나 APP_PORT를 바꿔야 한다." >&2
         exit 1
     fi
     if [ -z "$jar" ]; then
-        echo "[api-bench] bootJar 빌드"
+        echo "[app] bootJar 빌드"
         (cd "$ROOT_DIR" && ./gradlew :apps:commerce-api:bootJar -x test -q)
         jar="$(ls -t "$ROOT_DIR"/apps/commerce-api/build/libs/*.jar | grep -v -- "-plain" | head -1)"
     fi
-    echo "[api-bench] 앱 기동: ${jar#$ROOT_DIR/}"
+    echo "[app] 앱 기동 (DB $db, ddl-auto=$ddl): ${jar#$ROOT_DIR/}"
     # shellcheck disable=SC2046
-    java -jar "$jar" $(app_args) > "$log" 2>&1 &
+    java -jar "$jar" $(app_args "$db" "$ddl") > "$log" 2>&1 &
     APP_PID=$!
     trap stop_app EXIT INT TERM
     for ((i = 0; i < APP_START_TIMEOUT; i++)); do
         if ! kill -0 "$APP_PID" 2>/dev/null; then
-            echo "[api-bench] 앱이 기동 중 종료됐다. 로그 마지막 부분:" >&2
+            echo "[app] 앱이 기동 중 종료됐다. 로그 마지막 부분:" >&2
             tail -30 "$log" >&2
             exit 1
         fi
         code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-USER-ID: $API_USER_ID" \
             "http://127.0.0.1:$APP_PORT/api/v1/products/1" || true)"
         if [ "$code" != "000" ]; then
-            echo "[api-bench] 앱 준비 완료 (${i}초, 첫 응답 $code)"
+            echo "[app] 앱 준비 완료 (${i}초, 첫 응답 $code)"
             return
         fi
         sleep 1
     done
-    echo "[api-bench] ${APP_START_TIMEOUT}초 안에 앱이 응답하지 않았다." >&2
+    echo "[app] ${APP_START_TIMEOUT}초 안에 앱이 응답하지 않았다." >&2
     exit 1
 }
 
@@ -425,6 +429,14 @@ api_bench() {
     details="$work/details.txt"
     : > "$rows"
     : > "$details"
+
+    local products_before products_after
+    products_before="$(count_products)"
+    echo "[api-bench] 시작 전 $PERF_DB.products: $products_before"
+    if [ "${products_before:-0}" -eq 0 ]; then
+        echo "[api-bench] $PERF_DB.products가 비어 있다. scripts/perf/run.sh seed를 먼저 실행해야 한다." >&2
+        exit 1
+    fi
 
     start_app "$log"
 
@@ -490,18 +502,28 @@ api_bench() {
     stop_app
     trap - EXIT INT TERM
 
+    # 앱 기동이 측정 데이터를 지우지 않았는지 확인한다 (ddl-auto 덮어쓰기가 빠지면 create로 테이블이 다시 만들어진다)
+    products_after="$(count_products)"
+    echo "[api-bench] 종료 후 $PERF_DB.products: $products_after"
+    if [ "$products_after" != "$products_before" ]; then
+        echo "[api-bench] 측정 중 products 건수가 바뀌었다 ($products_before → $products_after). 이 측정은 실패로 본다." >&2
+        failed=$((failed + 1))
+    fi
+
     {
         echo
         if [ "$failed" -ne 0 ]; then
-            echo "## API 측정: $label ($(date '+%Y-%m-%d %H:%M')) — 실패: 200이 아닌 응답 포함, 비교에 쓰지 않는다"
+            echo "## API 측정: $label ($(date '+%Y-%m-%d %H:%M')) — 실패: 200이 아닌 응답 또는 데이터 변경, 비교에 쓰지 않는다"
         else
             echo "## API 측정: $label ($(date '+%Y-%m-%d %H:%M'))"
         fi
         echo
         env_line
         echo "- 앱: commerce-api local 프로필 + 명령행 인자 \`$(app_args | tr '\n' ' ' | sed "s/password=[^ ]*/password=***/")\`"
+        echo "  개선 후(after) 측정도 같은 계정(${APP_DB_USER})·옵션으로 실행해야 비교할 수 있다."
+        echo "- 데이터 보존 확인: $PERF_DB.products 시작 전 $products_before / 종료 후 $products_after"
         echo "- 방식: curl 순차 1개, X-USER-ID: $API_USER_ID. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank)."
-        echo "  첫 요청이 ${API_SLOW_MS}ms를 넘으면 워밍업 ${API_SLOW_WARMUP}회 + 측정 ${API_SLOW_REQUESTS}회로 줄인다."
+        echo "  첫 요청이 ${API_SLOW_MS}ms를 넘으면 워밍업 ${API_SLOW_WARMUP}회 + 측정 ${API_SLOW_REQUESTS}회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다."
         echo "- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=$PERF_DB(앱 커넥션) 실행 수를 요청 수로 나눈 값"
         echo "- 응답 스냅샷: \`docs/week4/perf-results/$label/api-*.tsv\` (마지막 응답의 id·price·likeCount)"
         data_lines
@@ -523,9 +545,81 @@ api_bench() {
     echo
     echo "[api-bench] 완료: docs/week4/query-performance-raw.md 에 'API 측정: $label' 섹션 추가, 스냅샷 ${out_dir#$ROOT_DIR/}/"
     if [ "$failed" -ne 0 ]; then
-        echo "[api-bench] 200이 아닌 응답이 있는 요청이 ${failed}개다. 이 측정은 실패로 본다." >&2
+        echo "[api-bench] 실패 항목이 ${failed}개다(200이 아닌 응답 또는 데이터 변경). 이 측정은 실패로 본다." >&2
         exit 1
     fi
+}
+
+count_products() {
+    echo "SELECT COUNT(*) FROM \`$PERF_DB\`.products;" | mysql_db --batch --skip-column-names 2>/dev/null || echo 0
+}
+
+# ---------------------------------------------------------------- ddl-check
+DDL_TABLES="users brands products product_likes"
+DDL_TABLES_SQL="'users', 'brands', 'products', 'product_likes'"
+
+# 컬럼(이름·타입·NULL·extra)과 인덱스(유일 여부·컬럼 목록)를 이름과 무관하게 비교할 수 있는 형태로 출력한다.
+# 컬럼 순서와 유일 제약 이름은 결과·실행 계획에 영향이 없어 비교에서 뺀다.
+schema_signature() {
+    local db="$1"
+    echo "SELECT CONCAT('column ', TABLE_NAME, '.', COLUMN_NAME, ' ', COLUMN_TYPE,
+                  IF(IS_NULLABLE = 'NO', ' NOT NULL', ' NULL'), IF(EXTRA = '', '', CONCAT(' ', EXTRA)))
+          FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = '$db' AND TABLE_NAME IN ($DDL_TABLES_SQL)
+          UNION ALL
+          SELECT CONCAT('index ', TABLE_NAME, IF(INDEX_NAME = 'PRIMARY', ' PRIMARY', IF(NON_UNIQUE = 0, ' UNIQUE', ' INDEX')),
+                  ' (', GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX), ')')
+          FROM information_schema.STATISTICS
+          WHERE TABLE_SCHEMA = '$db' AND TABLE_NAME IN ($DDL_TABLES_SQL)
+          GROUP BY TABLE_NAME, INDEX_NAME, NON_UNIQUE;" | mysql_db --batch --skip-column-names | sort
+}
+
+show_create_tables() {
+    local db="$1" table
+    for table in $DDL_TABLES; do
+        echo "SHOW CREATE TABLE \`$db\`.\`$table\`;" | mysql_db --batch --raw --skip-column-names | cut -f2-
+        echo
+    done
+}
+
+ddl_check() {
+    local app_db="loopers_ddlcheck_app" seed_db="loopers_ddlcheck_seed" work log result=0
+    work="$(mktemp -d)"
+    log="$work/app.log"
+    echo "[ddl-check] 임시 DB $app_db(앱 ddl-auto=create) / $seed_db(seed.sql CREATE TABLE)를 만든다"
+    echo "DROP DATABASE IF EXISTS \`$app_db\`; CREATE DATABASE \`$app_db\` DEFAULT CHARACTER SET utf8mb4;
+          DROP DATABASE IF EXISTS \`$seed_db\`; CREATE DATABASE \`$seed_db\` DEFAULT CHARACTER SET utf8mb4;" | mysql_db
+
+    # seed.sql에서 CREATE TABLE IF NOT EXISTS 문만 뽑아 빈 DB에 실행한다
+    awk '/^CREATE TABLE IF NOT EXISTS/ { on = 1 } on { print } on && /;[[:space:]]*$/ { on = 0 }' "$PERF_DIR/seed.sql" \
+        | mysql_db "$seed_db"
+
+    start_app "$log" "$app_db" "create"
+    stop_app
+    trap - EXIT INT TERM
+
+    echo "==================== 앱(Hibernate ddl-auto=create)"
+    show_create_tables "$app_db"
+    echo "==================== seed.sql"
+    show_create_tables "$seed_db"
+
+    schema_signature "$app_db" > "$work/app.sig"
+    schema_signature "$seed_db" > "$work/seed.sig"
+    echo "==================== 비교 (< 앱 / > seed.sql, 컬럼 순서·유일 제약 이름 제외)"
+    if [ ! -s "$work/app.sig" ]; then
+        echo "[ddl-check] 앱 DB에 대상 테이블이 없다. 앱 로그 마지막 부분:" >&2
+        tail -30 "$log" >&2
+        result=1
+    elif diff "$work/app.sig" "$work/seed.sig"; then
+        echo "[ddl-check] 차이 없음 ($DDL_TABLES)"
+    else
+        echo "[ddl-check] 차이가 있다. seed.sql의 CREATE TABLE을 앱 스키마에 맞춰야 한다." >&2
+        result=1
+    fi
+
+    echo "DROP DATABASE IF EXISTS \`$app_db\`; DROP DATABASE IF EXISTS \`$seed_db\`;" | mysql_db
+    rm -rf "$work"
+    return "$result"
 }
 
 case "${1:-}" in
@@ -533,6 +627,7 @@ case "${1:-}" in
     bench) shift; bench "$@" ;;
     compare) shift; compare "$@" ;;
     api-bench) shift; api_bench "$@" ;;
+    ddl-check) ddl_check ;;
     *)
         sed -n '2,/^set -euo/p' "$0" | sed '$d'
         exit 1
