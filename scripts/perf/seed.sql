@@ -170,4 +170,7 @@ UNION ALL SELECT 'product_likes', COUNT(*) FROM product_likes
 UNION ALL SELECT 'violation:삭제 브랜드의 미삭제 상품', COUNT(*)
     FROM products p JOIN brands b ON b.id = p.brand_id WHERE b.deleted = 1 AND p.deleted = 0
 UNION ALL SELECT 'violation:없는 사용자의 좋아요', COUNT(*)
-    FROM product_likes l LEFT JOIN users u ON u.id = l.user_id WHERE u.id IS NULL;
+    FROM product_likes l LEFT JOIN users u ON u.id = l.user_id WHERE u.id IS NULL
+UNION ALL SELECT 'brand 1 products(deleted=false)', COUNT(*) FROM products WHERE brand_id = 1 AND deleted = 0
+UNION ALL SELECT 'brand 200 products(deleted=false)', COUNT(*) FROM products WHERE brand_id = 200 AND deleted = 0
+UNION ALL SELECT 'product 1 likes', COUNT(*) FROM product_likes WHERE product_id = 1;

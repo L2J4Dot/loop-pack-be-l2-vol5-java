@@ -19,6 +19,8 @@
 #   MYSQL_CMD    mysql 클라이언트 명령 (기본: compose의 mysql 컨테이너에서 root로 실행)
 #   api-bench    APP_JAR(없으면 bootJar 빌드) APP_PORT(8080) APP_DB_USER/APP_DB_PASSWORD(root/root)
 #                API_WARMUP(20) API_REQUESTS(200) API_SLOW_MS(5000, 첫 요청이 넘으면 워밍업 1회 + 측정 3회)
+#                API_REQUEST_TIMEOUTS 요청별 curl 제한(초). 예) "R3=60" — 넘으면 TIMEOUT으로 기록하고 그 요청은
+#                더 보내지 않으며(실패로 보지 않음), 남은 앱 쿼리는 KILL QUERY로 끊는다
 #                개선 전후 비교는 같은 계정·옵션(root, show-sql=false 등 app_args)으로 측정한다
 #   seed 규모    BRANDS(200) PRODUCTS(100000) LIKES(1000000) USERS(50000)
 #   seed 부하    CHUNK(100000, 청크마다 커밋) CHUNK_SLEEP(0, 청크 사이 쉬는 초)
@@ -46,6 +48,8 @@ API_REQUESTS="${API_REQUESTS:-200}"
 API_SLOW_MS="${API_SLOW_MS:-5000}"
 API_SLOW_WARMUP="${API_SLOW_WARMUP:-1}"
 API_SLOW_REQUESTS="${API_SLOW_REQUESTS:-3}"
+API_REQUEST_TIMEOUTS="${API_REQUEST_TIMEOUTS:-}"
+CURL_MAX_TIME=900
 BRANDS="${BRANDS:-200}"
 PRODUCTS="${PRODUCTS:-100000}"
 LIKES="${LIKES:-1000000}"
@@ -176,6 +180,18 @@ env_line() {
     fi
     java_ver="$(java -version 2>&1 | grep -v 'Picked up' | head -1)"
     echo "- 환경: $os / CPU $cpu / 메모리 $mem / MySQL $(echo 'SELECT VERSION();' | mysql_db --batch --skip-column-names) / Java: ${java_ver:-없음}"
+    echo "- 디스크 여유: $(disk_free) / buffer pool $(echo 'SELECT @@innodb_buffer_pool_size DIV 1048576;' | mysql_db --batch --skip-column-names)MB"
+}
+
+# MySQL 데이터 디렉터리가 이 호스트에 있으면 그 위치, 아니면(도커 등) 스크립트를 실행한 위치의 디스크 여유
+disk_free() {
+    local dir
+    dir="$(echo 'SELECT @@datadir;' | mysql_db --batch --skip-column-names 2>/dev/null)"
+    if [ -n "$dir" ] && [ -d "$dir" ] && df -h "$dir" > /dev/null 2>&1; then
+        df -h "$dir" | awk 'NR == 2 { print $4 " (MySQL 데이터 디렉터리)" }'
+    else
+        df -h "$ROOT_DIR" | awk 'NR == 2 { print $4 " (스크립트 실행 위치, MySQL이 컨테이너면 참고값)" }'
+    fi
 }
 
 data_lines() {
@@ -184,6 +200,12 @@ data_lines() {
           ' (삭제 ', (SELECT COUNT(*) FROM brands WHERE deleted = 1), ') / products ', (SELECT COUNT(*) FROM products),
           ' (미삭제 ', (SELECT COUNT(*) FROM products WHERE deleted = 0), ') / product_likes ',
           (SELECT COUNT(*) FROM product_likes));" | mysql_db --batch --skip-column-names "$PERF_DB"
+    echo -n "- 테이블 크기(데이터+인덱스): "
+    echo "SELECT GROUP_CONCAT(CONCAT(TABLE_NAME, ' ', ROUND((DATA_LENGTH + INDEX_LENGTH) / 1048576), 'MB')
+                 ORDER BY TABLE_NAME SEPARATOR ' / ')
+          FROM information_schema.TABLES
+          WHERE TABLE_SCHEMA = '$PERF_DB' AND TABLE_NAME IN ('users', 'brands', 'products', 'product_likes');" \
+        | mysql_db --batch --skip-column-names "$PERF_DB"
     echo -n "- 인덱스: "
     echo "SELECT GROUP_CONCAT(CONCAT(TABLE_NAME, '.', INDEX_NAME, '(', cols, ')') ORDER BY TABLE_NAME, INDEX_NAME SEPARATOR ', ')
           FROM (SELECT TABLE_NAME, INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols
@@ -386,7 +408,7 @@ start_app() {
 # 요청 1회: 본문은 $2 파일에, "상태코드 초" 를 출력한다
 one_request() {
     local out
-    out="$(curl -s -o "$2" -w '%{http_code} %{time_total}' --max-time 900 -H "X-USER-ID: $API_USER_ID" \
+    out="$(curl -s -o "$2" -w '%{http_code} %{time_total}' --max-time "$CURL_MAX_TIME" -H "X-USER-ID: $API_USER_ID" \
         "http://127.0.0.1:$APP_PORT$1")" || true
     echo "${out:-000 0}"
 }
@@ -409,6 +431,16 @@ response_snapshot() {
         $1 == "\"price\"" { price = $2 }
         $1 == "\"likeCount\"" { print id "\t" price "\t" $2 }
     '
+}
+
+# 앱 커넥션(기본 DB가 측정 DB)에서 5초 넘게 실행 중인 쿼리를 끊는다
+kill_app_queries() {
+    local id
+    for id in $(echo "SELECT ID FROM information_schema.PROCESSLIST
+                      WHERE DB = '$PERF_DB' AND COMMAND = 'Query' AND TIME >= 5;" | perf_schema); do
+        echo "KILL QUERY $id;" | perf_schema || true
+        echo "[api-bench] 앱 쿼리 중단: KILL QUERY $id"
+    done
 }
 
 perf_schema() {
@@ -449,9 +481,25 @@ api_bench() {
         ok=0
         fail=0
 
+        CURL_MAX_TIME="$(lookup "$API_REQUEST_TIMEOUTS" "$name" 900)"
         first="$(one_request "$path" "$body")"
         code="${first%% *}"
         secs="${first#* }"
+        if [ "$code" = "000" ] && awk -v s="$secs" -v t="$CURL_MAX_TIME" 'BEGIN { exit !(s >= t - 0.5) }'; then
+            # 요청별 제한 시간 초과: 측정 실패가 아니라 "제한 초과"로 기록하고 이 요청은 더 보내지 않는다.
+            # 클라이언트가 끊어도 앱의 SQL은 계속 돌기 때문에 남은 쿼리를 끊어 다음 측정에 영향이 없게 한다.
+            echo "[api-bench] $name: ${CURL_MAX_TIME}초 안에 응답 없음 → TIMEOUT으로 기록"
+            kill_app_queries
+            echo "# TIMEOUT (>${CURL_MAX_TIME}s) - 응답 없음" > "$out_dir/api-$name.tsv"
+            printf "| %s | %s | \`%s\` | %s | %s | TIMEOUT(>%ss) | - | - | - | - | - | - | - |\n" \
+                "$name" "$desc" "$path" 1 0 "$CURL_MAX_TIME" >> "$rows"
+            {
+                echo "-- $name $path: ${CURL_MAX_TIME}초 제한 초과로 측정하지 않음 (SQL 집계 없음)"
+                echo
+            } >> "$details"
+            CURL_MAX_TIME=900
+            continue
+        fi
         [ "$code" = "200" ] || fail=$((fail + 1))
         if awk -v s="$secs" -v t="$API_SLOW_MS" 'BEGIN { exit !(s * 1000 > t) }'; then
             warm_n="$API_SLOW_WARMUP"
@@ -489,6 +537,7 @@ api_bench() {
 
         printf "| %s | %s | \`%s\` | %s | %s | %s | %s/%s | %s | %s | %s |\n" "$name" "$desc" "$path" "$warm_n" "$n" \
             "$(echo "$stats" | sed 's/\t/ | /g')" "$ok" "$((n))" "$sql_total" "$sql_select" "$sql_ms" >> "$rows"
+        CURL_MAX_TIME=900
         if [ "$fail" -ne 0 ]; then
             echo "[api-bench] $name: 200이 아닌 응답 ${fail}건 (워밍업 포함). 측정 실패로 본다." >&2
         fi
