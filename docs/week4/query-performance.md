@@ -25,8 +25,9 @@
 | 스키마 | 애플리케이션 JPA 엔티티와 같은 형태. 인덱스는 PK와 `product_likes (user_id, product_id)` 유일 인덱스뿐 |
 | 측정 DB | `loopers_perf` (애플리케이션 local DB `loopers`와 분리) |
 
-> 1절과 5절 수치는 seed 규칙 보강(3.1) 전에 클라우드에서 잰 참고값(reference-cloud)이며 그대로 둔다.
-> 개선 전후 비교의 기준은 로컬(맥)에서 `bench baseline`·`api-bench baseline`으로 남긴 원본 기록이다. 개선 전후 비교는 같은 장비에서 한다.
+> 1절과 5.1~5.4절 수치는 seed 규칙 보강(3.1) 전에 클라우드에서 잰 참고값(reference-cloud)이며 그대로 둔다.
+> 개선 전후 비교의 기준은 5.0절의 baseline이다. 맥의 Docker MySQL에 측정 도구가 접속할 수 없어, 사용자 승인 후 **위 표와 같은 클라우드 환경에서 실제 앱(commerce-api)으로** 측정했다.
+> 개선 후(after) 측정도 같은 클라우드 환경·계정·인자로 다시 실행해 비교한다. 장비가 바뀌면 baseline부터 다시 잰다.
 
 ## 3. 데이터 생성
 
@@ -173,6 +174,45 @@ scripts/perf/run.sh compare baseline after-index       # 개선 후 결과가 �
 ```
 
 ## 5. 개선 전 결과와 원인
+
+### 5.0 baseline (2026-10-14, 클라우드, 실제 앱)
+
+- 환경: Linux x86_64, Intel Xeon 2.10GHz 2코어, 메모리 8GB, MySQL 8.0.46(기본 설정), Java 21.0.12, Redis 7(마스터 6379·복제 6380)
+- 앱: `commerce-api` 소스(`83d186a`) bootJar를 local 프로필 + 4.2절 인자(root, `ddl-auto=none`, `show-sql=false`)로 기동
+- 데이터: 10만 규모 seed (users 50,000 / 미삭제 상품 92,859 / 좋아요 974,368), 측정 전후 products 100,000건 유지
+- `ddl-check`: 실제 Hibernate가 만든 스키마와 `seed.sql` 스키마의 컬럼·인덱스 차이 없음 (컬럼 순서·유일 제약 이름만 다름)
+- 원본: [query-performance-raw.md](query-performance-raw.md)의 `측정: baseline`·`API 측정: baseline`, 스냅샷 `perf-results/baseline/`
+
+**요청 단위** (curl 순차 1개, `X-USER-ID: 1`, 모든 응답 200)
+
+| 요청 | 워밍업 / 표본 | p50 | p95 | p99 | 최대 | 요청당 SQL (SELECT) | 요청당 SQL 시간 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **R1** 브랜드 1 가격순 (과제 대상) | 20 / 200 | **153.6ms** | **170.9ms** | 183.6ms | 1,053.4ms | **14 (4)** | 135.2ms |
+| R2 브랜드 200 가격순 | 20 / 200 | 147.5ms | 167.2ms | 175.7ms | 194.5ms | 14 (4) | 134.5ms |
+| R3 브랜드 200 좋아요순 | 1 / 3 | 19,459ms | 19,737ms | 19,737ms | 19,737ms | 14 (4) | 19,411ms |
+| R4 상품 1 상세 | 20 / 200 | 96.5ms | 109.1ms | 121.5ms | 132.2ms | 14 (4) | 85.9ms |
+
+- R1 최대 1,053ms는 200회 중 1회의 튐이다(p99 183.6ms). 기동 직후 JIT·커넥션 생성 영향으로 보이며, 비교는 p50·p95로 한다.
+- 요청당 SQL 14개 = SELECT 4개(사용자 존재 확인, 상품 조회, 브랜드 일괄 조회, 좋아요 수 집계) + 트랜잭션 제어문 10개.
+  트랜잭션 제어문은 요청마다 트랜잭션이 2개(사용자 확인, 조회)라 `SET autocommit` 4·`SET SESSION TRANSACTION READ ONLY/READ WRITE` 각 2·`COMMIT` 2가 나간 것이다.
+- R1의 SQL 시간 135ms 중 좋아요 수 집계(Q9 형태)가 약 110ms, 상품 조회(Q4 형태)가 약 23ms다. **R1을 느리게 만드는 주원인은 상품 조회가 아니라 좋아요 수 집계**다.
+
+**SQL 단위** (서버 실행 시간 평균)
+
+| 쿼리 | 실행 횟수 | 평균 | 비고 |
+| --- | ---: | ---: | --- |
+| Q1 최신순 (전체) | 10 | 28.2ms | ALL + filesort |
+| Q2 최신순 (브랜드 1) | 10 | 23.1ms | ALL + filesort |
+| Q3 가격순 (전체) | 10 | 22.9ms | ALL + filesort |
+| **Q4** 가격순 (브랜드 1) | 10 | **23.7ms** | ALL + filesort, R1의 상품 조회 |
+| Q5 깊은 페이지 | 10 | 58.9ms | ALL + filesort |
+| Q6 좋아요순 (전체) | - | TIMEOUT(>60s) | 하한값, EXPLAIN만 |
+| Q7 좋아요순 (브랜드 1) | - | TIMEOUT(>60s) | 하한값, EXPLAIN만 |
+| Q8 좋아요순 (브랜드 200) | 3 | 19,213ms | R3의 상품 조회 |
+| **Q9** 좋아요 수 20개 | 10 | **102.8ms** | 인덱스 전체 스캔, R1·R2의 좋아요 수 집계 |
+| Q10 좋아요 수 1개 | 10 | 86.0ms | 인덱스 전체 스캔, R4의 좋아요 수 집계 |
+
+- 결과 일치 확인: R1 응답(id·price)은 Q4 스냅샷과, R3 응답(id·좋아요 수)은 Q8 스냅샷과 같다. 같은 seed를 두 번 만들어 bench한 결과도 compare에서 차이가 없었다(Q6·Q7은 비교 불가).
 
 ### 5.1 결과 (평균, ms)
 
