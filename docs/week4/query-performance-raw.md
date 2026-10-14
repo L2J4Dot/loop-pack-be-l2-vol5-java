@@ -2,7 +2,7 @@
 
 > `scripts/perf/run.sh bench`가 측정할 때마다 아래에 섹션을 추가한다. 해석과 요약은 [query-performance.md](query-performance.md)에 정리한다.
 
-## 측정: baseline-100k (2026-10-14 01:41)
+## 측정: reference-100k (2026-10-14 01:41)
 
 - 환경: MySQL 8.0.46-0ubuntu0.24.04.4, DB `loopers_perf`
 - 방식: 쿼리별 워밍업 1회 후 5회 실행, SHOW PROFILES의 서버 실행 시간(ms). 1회 제한 30000ms

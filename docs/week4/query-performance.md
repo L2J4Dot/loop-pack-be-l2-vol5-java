@@ -423,7 +423,7 @@ FROM perf_seq WHERE n < {limit};
 ## 부록 B. 참고 측정: seed 규칙 보강 전 10만·1,000만 규모
 
 > 데이터 규모가 커질 때 비용이 어떻게 늘어나는지 보여 주는 참고값이다. seed 규칙 보강 전 데이터라 2절 baseline과 직접 비교하지 않는다.
-> 원본은 [query-performance-raw.md](query-performance-raw.md)의 `측정: baseline-100k (2026-10-14 01:41)`(10만)과 `측정: reference-10m (2026-10-14 01:23)`(1,000만)이다.
+> 원본은 [query-performance-raw.md](query-performance-raw.md)의 `측정: reference-100k (2026-10-14 01:41)`(10만)과 `측정: reference-10m (2026-10-14 01:23)`(1,000만)이다.
 
 ### B.1 요약
 
