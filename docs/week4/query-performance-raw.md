@@ -1353,3 +1353,438 @@ SELECT p.id AS product_id, p.like_count AS total FROM products p WHERE p.id IN (
 ```
 
 </details>
+
+
+## API 측정: cache-off (2026-10-16 00:12)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 27G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+  개선 후(after) 측정도 같은 계정(root)·옵션으로 실행해야 비교할 수 있다.
+- 데이터 보존 확인: loopers_perf.products 시작 전 100000 / 종료 후 100000
+- 방식: curl 순차 1개, X-USER-ID: 1. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank).
+  첫 요청이 5000ms를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다.
+- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=loopers_perf(앱 커넥션) 실행 수를 요청 수로 나눈 값
+- 응답 스냅샷: `docs/week4/perf-results/cache-off/api-*.tsv` (마지막 응답의 id·price·likeCount)
+- 데이터: users 50000 / brands 200 (삭제 5) / products 100000 (미삭제 92859) / product_likes 974368
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 95MB(인덱스 52MB) / products 27MB(인덱스 18MB) / users 2MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| R1 | 브랜드 1 가격순 1페이지 (과제 측정 대상) | `/api/v1/products?brandId=1&sort=price_asc&page=0&size=20` | 20 | 200 | 14.9 | 28.6 | 37.6 | 41.8 | 200/200 | 14.0 | 4.0 | 2.4 |
+| R2 | 브랜드 200 가격순 1페이지 | `/api/v1/products?brandId=200&sort=price_asc&page=0&size=20` | 20 | 200 | 10.2 | 18.2 | 24.0 | 28.9 | 200/200 | 14.0 | 4.0 | 1.8 |
+| R3 | 브랜드 200 좋아요순 1페이지 | `/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` | 20 | 200 | 8.2 | 14.0 | 20.4 | 35.3 | 200/200 | 14.0 | 4.0 | 1.5 |
+| R4 | 상품 1 상세 | `/api/v1/products/1` | 20 | 200 | 5.9 | 10.6 | 14.4 | 14.9 | 200/200 | 14.0 | 4.0 | 1.1 |
+
+<details><summary>요청별 SQL digest</summary>
+
+```text
+-- R1 /api/v1/products?brandId=1&sort=price_asc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	45.23	SET autocommit = ?
+400	25.07	COMMIT
+400	23.30	SET SESSION TRANSACTION READ ONLY
+400	13.84	SET SESSION TRANSACTION READ WRITE
+200	203.14	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+200	69.94	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	58.29	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	36.68	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R2 /api/v1/products?brandId=200&sort=price_asc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	44.49	SET autocommit = ?
+400	24.74	SET SESSION TRANSACTION READ ONLY
+400	23.90	COMMIT
+400	15.95	SET SESSION TRANSACTION READ WRITE
+200	105.84	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+200	56.80	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	47.08	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	38.15	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R3 /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	38.45	SET autocommit = ?
+400	25.23	SET SESSION TRANSACTION READ ONLY
+400	21.46	COMMIT
+400	15.03	SET SESSION TRANSACTION READ WRITE
+200	74.11	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . like_count DESC , p . id DESC LIMIT ? OFFSET ?
+200	53.13	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	40.65	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	35.56	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R4 /api/v1/products/1 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	42.55	SET autocommit = ?
+400	22.45	SET SESSION TRANSACTION READ ONLY
+400	16.07	COMMIT
+400	11.99	SET SESSION TRANSACTION READ WRITE
+200	33.59	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	30.72	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+200	28.39	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	27.28	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+
+```
+
+</details>
+
+## API 측정: cache-hit (2026-10-16 00:13)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 27G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+  개선 후(after) 측정도 같은 계정(root)·옵션으로 실행해야 비교할 수 있다.
+- 데이터 보존 확인: loopers_perf.products 시작 전 100000 / 종료 후 100000
+- 방식: curl 순차 1개, X-USER-ID: 1. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank).
+  첫 요청이 5000ms를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다.
+- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=loopers_perf(앱 커넥션) 실행 수를 요청 수로 나눈 값
+- 응답 스냅샷: `docs/week4/perf-results/cache-hit/api-*.tsv` (마지막 응답의 id·price·likeCount)
+- 캐시 모드: hit (워밍업이 채운 캐시를 읽음)
+- Redis 상태: 시작 전 version=(없음) keys=0 / 종료 후 version=(없음) keys=3 (목록 키 수는 SCAN으로 셈)
+- 요청당 Redis 명령: 측정 구간 전후 INFO commandstats 차이 ÷ 표본 (도구가 보낸 INCR·INFO·SCAN 제외)
+- 데이터: users 50000 / brands 200 (삭제 5) / products 100000 (미삭제 92859) / product_likes 974368
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 95MB(인덱스 52MB) / products 27MB(인덱스 18MB) / users 2MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) | 요청당 목록 검색 SELECT | 요청당 Redis 명령 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| R1 | 브랜드 1 가격순 1페이지 (과제 측정 대상) | `/api/v1/products?brandId=1&sort=price_asc&page=0&size=20` | 20 | 200 | 13.1 | 25.9 | 33.0 | 50.5 | 200/200 | 12.0 | 2.0 | 1.2 | 0.0 | GET 2.0 / SET 0.0 / INCR 0.0 / 기타 0.0 |
+| R2 | 브랜드 200 가격순 1페이지 | `/api/v1/products?brandId=200&sort=price_asc&page=0&size=20` | 20 | 200 | 9.1 | 17.0 | 21.0 | 56.7 | 200/200 | 12.0 | 2.0 | 1.1 | 0.0 | GET 2.0 / SET 0.0 / INCR 0.0 / 기타 0.0 |
+| R3 | 브랜드 200 좋아요순 1페이지 | `/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` | 20 | 200 | 6.3 | 11.6 | 16.3 | 31.2 | 200/200 | 12.0 | 2.0 | 1.0 | 0.0 | GET 2.0 / SET 0.0 / INCR 0.0 / 기타 0.0 |
+| R4 | 상품 1 상세 | `/api/v1/products/1` | 20 | 200 | 6.1 | 11.7 | 18.7 | 30.0 | 200/200 | 14.0 | 4.0 | 1.1 | 0.0 | GET 0.0 / SET 0.0 / INCR 0.0 / 기타 0.0 |
+
+<details><summary>요청별 SQL digest</summary>
+
+```text
+-- R1 /api/v1/products?brandId=1&sort=price_asc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	42.03	SET autocommit = ?
+400	30.43	SET SESSION TRANSACTION READ ONLY
+400	25.16	COMMIT
+400	15.68	SET SESSION TRANSACTION READ WRITE
+200	80.80	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	37.69	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R2 /api/v1/products?brandId=200&sort=price_asc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	39.86	SET autocommit = ?
+400	30.17	COMMIT
+400	29.97	SET SESSION TRANSACTION READ ONLY
+400	13.67	SET SESSION TRANSACTION READ WRITE
+200	72.83	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	35.45	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R3 /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	36.85	SET autocommit = ?
+400	23.40	SET SESSION TRANSACTION READ ONLY
+400	19.11	COMMIT
+400	12.62	SET SESSION TRANSACTION READ WRITE
+200	73.80	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	31.34	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R4 /api/v1/products/1 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	39.21	SET autocommit = ?
+400	20.35	SET SESSION TRANSACTION READ ONLY
+400	19.29	SET SESSION TRANSACTION READ WRITE
+400	16.75	COMMIT
+200	36.12	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+200	35.80	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	29.71	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	29.47	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+
+```
+
+</details>
+
+## API 측정: cache-miss (2026-10-16 00:13)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 27G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+  개선 후(after) 측정도 같은 계정(root)·옵션으로 실행해야 비교할 수 있다.
+- 데이터 보존 확인: loopers_perf.products 시작 전 100000 / 종료 후 100000
+- 방식: curl 순차 1개, X-USER-ID: 1. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank).
+  첫 요청이 5000ms를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다.
+- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=loopers_perf(앱 커넥션) 실행 수를 요청 수로 나눈 값
+- 응답 스냅샷: `docs/week4/perf-results/cache-miss/api-*.tsv` (마지막 응답의 id·price·likeCount)
+- 캐시 모드: miss (측정·워밍업 요청마다 직전에 INCR products:list:version, 요청 시간 밖)
+- Redis 상태: 시작 전 version=(없음) keys=3 / 종료 후 version=660 keys=663 (목록 키 수는 SCAN으로 셈)
+- 요청당 Redis 명령: 측정 구간 전후 INFO commandstats 차이 ÷ 표본 (도구가 보낸 INCR·INFO·SCAN 제외)
+- 데이터: users 50000 / brands 200 (삭제 5) / products 100000 (미삭제 92859) / product_likes 974368
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 95MB(인덱스 52MB) / products 27MB(인덱스 18MB) / users 2MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) | 요청당 목록 검색 SELECT | 요청당 Redis 명령 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| R1 | 브랜드 1 가격순 1페이지 (과제 측정 대상) | `/api/v1/products?brandId=1&sort=price_asc&page=0&size=20` | 20 | 200 | 21.8 | 38.3 | 49.5 | 129.3 | 200/200 | 15.0 | 5.0 | 3.5 | 1.0 | GET 2.0 / SET 1.0 / INCR 0.0 / 기타 0.0 |
+| R2 | 브랜드 200 가격순 1페이지 | `/api/v1/products?brandId=200&sort=price_asc&page=0&size=20` | 20 | 200 | 13.0 | 22.6 | 32.7 | 41.9 | 200/200 | 15.0 | 5.0 | 2.1 | 1.0 | GET 2.0 / SET 1.0 / INCR 0.0 / 기타 0.0 |
+| R3 | 브랜드 200 좋아요순 1페이지 | `/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` | 20 | 200 | 10.9 | 19.0 | 24.6 | 30.2 | 200/200 | 15.0 | 5.0 | 2.1 | 1.0 | GET 2.0 / SET 1.0 / INCR 0.0 / 기타 0.0 |
+
+<details><summary>요청별 SQL digest</summary>
+
+```text
+-- R1 /api/v1/products?brandId=1&sort=price_asc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	48.41	SET autocommit = ?
+400	130.45	COMMIT
+400	39.08	SET SESSION TRANSACTION READ ONLY
+400	17.15	SET SESSION TRANSACTION READ WRITE
+200	240.22	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+200	67.45	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	59.35	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	57.06	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	46.93	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R2 /api/v1/products?brandId=200&sort=price_asc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	42.74	SET autocommit = ?
+400	28.37	SET SESSION TRANSACTION READ ONLY
+400	25.51	COMMIT
+400	13.33	SET SESSION TRANSACTION READ WRITE
+200	112.12	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+200	58.31	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	53.13	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	48.29	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	41.32	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R3 /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	55.62	SET autocommit = ?
+400	29.03	SET SESSION TRANSACTION READ ONLY
+400	26.23	COMMIT
+400	17.53	SET SESSION TRANSACTION READ WRITE
+200	96.45	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . like_count DESC , p . id DESC LIMIT ? OFFSET ?
+200	58.35	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	54.99	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	49.49	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+200	38.80	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+
+```
+
+</details>
+
+## 캐시 장애 측정: cache-redis-stop (Redis stop, 2026-10-16 00:14)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 27G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+- 방식: 정상 상태에서 R1 1회로 캐시를 채운 뒤 `/tmp/claude-0/redis-ctl.sh stop` → R1을 워밍업 없이 20회 순차 요청 → `/tmp/claude-0/redis-ctl.sh start`
+- 응답 비교 기준: `perf-results/cache-off/api-R1.tsv` (id·price·likeCount 순서, 빈 목록·가격 0이면 다름)
+- Redis 상태: 장애 전 version=660 keys=661 / 복구 후 version=(없음) keys=1
+- 복구: Redis 응답까지 0초, 9번째 요청 후 재채움 (200, 0.070621초, 키 products:list:v0:brand=1:sort=price_asc:page=0:size=20)
+- 앱 로그의 캐시 경고("상품 목록 캐시") 줄 수: 28
+- 데이터: users 50000 / brands 200 (삭제 5) / products 100000 (미삭제 92859) / product_likes 974368
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 95MB(인덱스 52MB) / products 27MB(인덱스 18MB) / users 2MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 상태 | 요청 | 200 응답 | 기준과 같은 응답 | p50 | p95 | p99 | 최대 | 응답 코드 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Redis stop | 20 | 20 | 20 | 1036.6 | 1047.8 | 1056.6 | 1056.6 | 200×20  |
+
+## 캐시 장애 측정: cache-redis-pause (Redis pause, 2026-10-16 00:15)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 27G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+- 방식: 정상 상태에서 R1 1회로 캐시를 채운 뒤 `/tmp/claude-0/redis-ctl.sh pause` → R1을 워밍업 없이 20회 순차 요청 → `/tmp/claude-0/redis-ctl.sh unpause`
+- 응답 비교 기준: `perf-results/cache-off/api-R1.tsv` (id·price·likeCount 순서, 빈 목록·가격 0이면 다름)
+- Redis 상태: 장애 전 version=(없음) keys=1 / 복구 후 version=(없음) keys=1
+- 복구: Redis 응답까지 0초, 1번째 요청 후 재채움 (200, 0.028070초, 키 products:list:v0:brand=1:sort=price_asc:page=0:size=20)
+- 앱 로그의 캐시 경고("상품 목록 캐시") 줄 수: 20
+- 데이터: users 50000 / brands 200 (삭제 5) / products 100000 (미삭제 92859) / product_likes 974368
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 95MB(인덱스 52MB) / products 27MB(인덱스 18MB) / users 2MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 상태 | 요청 | 200 응답 | 기준과 같은 응답 | p50 | p95 | p99 | 최대 | 응답 코드 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Redis pause | 20 | 20 | 20 | 1038.3 | 1075.0 | 1087.3 | 1087.3 | 200×20  |
+
+## API 측정: cache-off-10m (2026-10-16 00:25)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 24G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+  개선 후(after) 측정도 같은 계정(root)·옵션으로 실행해야 비교할 수 있다.
+- 데이터 보존 확인: loopers_perf.products 시작 전 10000000 / 종료 후 10000000
+- 방식: curl 순차 1개, X-USER-ID: 1. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank).
+  첫 요청이 99999999ms를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다.
+- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=loopers_perf(앱 커넥션) 실행 수를 요청 수로 나눈 값
+- 응답 스냅샷: `docs/week4/perf-results/cache-off-10m/api-*.tsv` (마지막 응답의 id·price·likeCount)
+- 데이터: users 500000 / brands 200 (삭제 5) / products 10000000 (미삭제 9293588) / product_likes 9969594
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 957MB(인덱스 522MB) / products 2504MB(인덱스 1694MB) / users 15MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| R1 | 브랜드 1 가격순 1페이지 (과제 측정 대상) | `/api/v1/products?brandId=1&sort=price_asc&page=0&size=20` | 3 | 30 | 24.4 | 47.1 | 51.1 | 51.1 | 30/30 | 14.0 | 4.0 | 3.2 |
+| R2 | 브랜드 200 가격순 1페이지 | `/api/v1/products?brandId=200&sort=price_asc&page=0&size=20` | 3 | 30 | 18.3 | 29.7 | 33.8 | 33.8 | 30/30 | 14.0 | 4.0 | 2.8 |
+| R3 | 브랜드 200 좋아요순 1페이지 | `/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` | 3 | 30 | 17.4 | 25.6 | 26.7 | 26.7 | 30/30 | 14.0 | 4.0 | 2.9 |
+| R4 | 상품 1 상세 | `/api/v1/products/1` | 3 | 30 | 13.3 | 31.1 | 33.7 | 33.7 | 30/30 | 14.0 | 4.0 | 1.4 |
+
+<details><summary>요청별 SQL digest</summary>
+
+```text
+-- R1 /api/v1/products?brandId=1&sort=price_asc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	5.89	SET autocommit = ?
+60	6.86	SET SESSION TRANSACTION READ ONLY
+60	4.36	COMMIT
+60	2.54	SET SESSION TRANSACTION READ WRITE
+30	45.23	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+30	11.47	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	11.41	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	7.82	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R2 /api/v1/products?brandId=200&sort=price_asc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	5.54	SET autocommit = ?
+60	4.38	SET SESSION TRANSACTION READ ONLY
+60	3.55	COMMIT
+60	2.04	SET SESSION TRANSACTION READ WRITE
+30	47.93	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+30	8.11	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	7.37	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	6.03	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R3 /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	5.20	SET autocommit = ?
+60	4.08	SET SESSION TRANSACTION READ ONLY
+60	3.44	COMMIT
+60	1.90	SET SESSION TRANSACTION READ WRITE
+30	50.19	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . like_count DESC , p . id DESC LIMIT ? OFFSET ?
+30	10.04	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	8.04	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	5.08	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R4 /api/v1/products/1 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	8.76	SET autocommit = ?
+60	3.95	SET SESSION TRANSACTION READ ONLY
+60	3.52	COMMIT
+60	2.20	SET SESSION TRANSACTION READ WRITE
+30	7.86	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	5.47	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+30	4.76	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	4.28	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+
+```
+
+</details>
+
+## API 측정: cache-hit-10m (2026-10-16 00:25)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 24G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+  개선 후(after) 측정도 같은 계정(root)·옵션으로 실행해야 비교할 수 있다.
+- 데이터 보존 확인: loopers_perf.products 시작 전 10000000 / 종료 후 10000000
+- 방식: curl 순차 1개, X-USER-ID: 1. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank).
+  첫 요청이 99999999ms를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다.
+- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=loopers_perf(앱 커넥션) 실행 수를 요청 수로 나눈 값
+- 응답 스냅샷: `docs/week4/perf-results/cache-hit-10m/api-*.tsv` (마지막 응답의 id·price·likeCount)
+- 캐시 모드: hit (워밍업이 채운 캐시를 읽음)
+- Redis 상태: 시작 전 version=1320 keys=0 / 종료 후 version=1320 keys=3 (목록 키 수는 SCAN으로 셈)
+- 요청당 Redis 명령: 측정 구간 전후 INFO commandstats 차이 ÷ 표본 (도구가 보낸 INCR·INFO·SCAN 제외)
+- 데이터: users 500000 / brands 200 (삭제 5) / products 10000000 (미삭제 9293588) / product_likes 9969594
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 957MB(인덱스 522MB) / products 2504MB(인덱스 1694MB) / users 15MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) | 요청당 목록 검색 SELECT | 요청당 Redis 명령 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| R1 | 브랜드 1 가격순 1페이지 (과제 측정 대상) | `/api/v1/products?brandId=1&sort=price_asc&page=0&size=20` | 3 | 30 | 27.7 | 40.6 | 41.7 | 41.7 | 30/30 | 12.0 | 2.0 | 1.6 | 0.0 | GET 2.0 / SET 0.0 / INCR 0.0 / 기타 0.0 |
+| R2 | 브랜드 200 가격순 1페이지 | `/api/v1/products?brandId=200&sort=price_asc&page=0&size=20` | 3 | 30 | 21.5 | 31.4 | 31.9 | 31.9 | 30/30 | 12.0 | 2.0 | 1.3 | 0.0 | GET 2.0 / SET 0.0 / INCR 0.0 / 기타 0.0 |
+| R3 | 브랜드 200 좋아요순 1페이지 | `/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` | 3 | 30 | 18.8 | 30.9 | 50.3 | 50.3 | 30/30 | 12.0 | 2.0 | 1.5 | 0.0 | GET 2.0 / SET 0.0 / INCR 0.0 / 기타 0.0 |
+| R4 | 상품 1 상세 | `/api/v1/products/1` | 3 | 30 | 16.6 | 27.3 | 27.5 | 27.5 | 30/30 | 14.0 | 4.0 | 1.6 | 0.0 | GET 0.0 / SET 0.0 / INCR 0.0 / 기타 0.0 |
+
+<details><summary>요청별 SQL digest</summary>
+
+```text
+-- R1 /api/v1/products?brandId=1&sort=price_asc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	6.72	SET autocommit = ?
+60	8.14	COMMIT
+60	6.98	SET SESSION TRANSACTION READ ONLY
+60	3.11	SET SESSION TRANSACTION READ WRITE
+30	14.40	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	7.96	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R2 /api/v1/products?brandId=200&sort=price_asc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	7.98	SET autocommit = ?
+60	4.17	COMMIT
+60	4.12	SET SESSION TRANSACTION READ ONLY
+60	2.31	SET SESSION TRANSACTION READ WRITE
+30	12.04	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	7.66	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R3 /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	7.42	SET autocommit = ?
+60	6.71	SET SESSION TRANSACTION READ ONLY
+60	4.34	COMMIT
+60	2.75	SET SESSION TRANSACTION READ WRITE
+30	14.22	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	9.51	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R4 /api/v1/products/1 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	8.54	SET autocommit = ?
+60	4.87	SET SESSION TRANSACTION READ ONLY
+60	4.78	COMMIT
+60	3.00	SET SESSION TRANSACTION READ WRITE
+30	8.47	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+30	7.02	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	6.57	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	5.11	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+
+```
+
+</details>
+
+## API 측정: cache-miss-10m (2026-10-16 00:25)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 24G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+  개선 후(after) 측정도 같은 계정(root)·옵션으로 실행해야 비교할 수 있다.
+- 데이터 보존 확인: loopers_perf.products 시작 전 10000000 / 종료 후 10000000
+- 방식: curl 순차 1개, X-USER-ID: 1. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank).
+  첫 요청이 99999999ms를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다.
+- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=loopers_perf(앱 커넥션) 실행 수를 요청 수로 나눈 값
+- 응답 스냅샷: `docs/week4/perf-results/cache-miss-10m/api-*.tsv` (마지막 응답의 id·price·likeCount)
+- 캐시 모드: miss (측정·워밍업 요청마다 직전에 INCR products:list:version, 요청 시간 밖)
+- Redis 상태: 시작 전 version=1320 keys=3 / 종료 후 version=1419 keys=102 (목록 키 수는 SCAN으로 셈)
+- 요청당 Redis 명령: 측정 구간 전후 INFO commandstats 차이 ÷ 표본 (도구가 보낸 INCR·INFO·SCAN 제외)
+- 데이터: users 500000 / brands 200 (삭제 5) / products 10000000 (미삭제 9293588) / product_likes 9969594
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 957MB(인덱스 522MB) / products 2504MB(인덱스 1694MB) / users 15MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) | 요청당 목록 검색 SELECT | 요청당 Redis 명령 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| R1 | 브랜드 1 가격순 1페이지 (과제 측정 대상) | `/api/v1/products?brandId=1&sort=price_asc&page=0&size=20` | 3 | 30 | 34.4 | 58.7 | 64.8 | 64.8 | 30/30 | 15.0 | 5.0 | 3.1 | 1.0 | GET 2.0 / SET 1.0 / INCR 0.0 / 기타 0.1 |
+| R2 | 브랜드 200 가격순 1페이지 | `/api/v1/products?brandId=200&sort=price_asc&page=0&size=20` | 3 | 30 | 28.7 | 38.5 | 43.8 | 43.8 | 30/30 | 15.0 | 5.0 | 3.3 | 1.0 | GET 2.0 / SET 1.0 / INCR 0.0 / 기타 0.1 |
+| R3 | 브랜드 200 좋아요순 1페이지 | `/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` | 3 | 30 | 24.5 | 42.4 | 43.6 | 43.6 | 30/30 | 15.0 | 5.0 | 3.8 | 1.0 | GET 2.0 / SET 1.0 / INCR 0.0 / 기타 0.0 |
+
+<details><summary>요청별 SQL digest</summary>
+
+```text
+-- R1 /api/v1/products?brandId=1&sort=price_asc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	8.25	SET autocommit = ?
+60	6.66	SET SESSION TRANSACTION READ ONLY
+60	5.33	COMMIT
+60	2.68	SET SESSION TRANSACTION READ WRITE
+30	34.28	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+30	11.33	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	8.75	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	8.65	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	7.25	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R2 /api/v1/products?brandId=200&sort=price_asc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	7.01	SET autocommit = ?
+60	4.97	SET SESSION TRANSACTION READ WRITE
+60	4.40	SET SESSION TRANSACTION READ ONLY
+60	4.18	COMMIT
+30	35.07	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+30	14.24	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	11.93	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	9.95	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	6.35	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R3 /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	8.49	SET autocommit = ?
+60	4.62	SET SESSION TRANSACTION READ ONLY
+60	4.12	COMMIT
+60	3.28	SET SESSION TRANSACTION READ WRITE
+30	54.36	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . like_count DESC , p . id DESC LIMIT ? OFFSET ?
+30	10.73	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	10.65	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	9.62	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	7.08	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+```
+
+</details>
