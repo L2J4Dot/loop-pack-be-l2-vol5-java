@@ -25,6 +25,7 @@ SET SESSION autocommit = 1;
 --   Long @Id IDENTITY → bigint auto_increment, long → bigint, int → int, boolean → bit,
 --   Instant → datetime(6), String(length=100) → varchar(100). 모든 컬럼이 NOT NULL이다.
 -- 차이: product_likes 유일 제약 이름은 Hibernate가 임의 이름(UK...)을 붙이므로 여기서만 이름을 정했다.
+-- like_count(@ColumnDefault 0)와 보조 인덱스는 엔티티의 @Index와 같은 이름·열·정렬 방향으로 만든다(설계 17·18절).
 -- 이미 있는 테이블은 그대로 쓴다(인덱스 상태는 측정 결과에 함께 기록된다).
 CREATE TABLE IF NOT EXISTS users (
     id         BIGINT       NOT NULL,
@@ -46,7 +47,14 @@ CREATE TABLE IF NOT EXISTS products (
     name       VARCHAR(100) NOT NULL,
     price      BIGINT       NOT NULL,
     stock      INT          NOT NULL,
-    PRIMARY KEY (id)
+    like_count BIGINT       NOT NULL DEFAULT 0,
+    PRIMARY KEY (id),
+    KEY idx_products_brand_price (brand_id, price ASC, id DESC),
+    KEY idx_products_brand_created (brand_id, created_at),
+    KEY idx_products_created (created_at DESC, id DESC),
+    KEY idx_products_price (price ASC, id DESC),
+    KEY idx_products_brand_likes (brand_id, like_count DESC, id DESC),
+    KEY idx_products_likes (like_count DESC, id DESC)
 ) ENGINE = InnoDB;
 
 CREATE TABLE IF NOT EXISTS product_likes (
@@ -54,7 +62,8 @@ CREATE TABLE IF NOT EXISTS product_likes (
     product_id BIGINT NOT NULL,
     user_id    BIGINT NOT NULL,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_product_likes_user_product (user_id, product_id)
+    UNIQUE KEY uk_product_likes_user_product (user_id, product_id),
+    KEY idx_product_likes_product (product_id)
 ) ENGINE = InnoDB;
 
 SET FOREIGN_KEY_CHECKS = 0;
@@ -150,6 +159,15 @@ SET @perf_sql = CONCAT(
      ORDER BY t.user_id, t.product_id');
 CALL perf_fill('product_likes', @perf_likes, 3, @perf_sql);
 
+-- 좋아요 수 초기 채우기 (설계 18절): 상품 id 구간마다 짧은 트랜잭션으로 실제 관계 수를 like_count에 넣는다.
+-- 구간 집계는 product_likes(product_id) 인덱스 범위를 읽고, 좋아요가 없는 상품은 기본값 0을 그대로 둔다.
+CALL perf_fill('like_count', @perf_products, 5,
+    'UPDATE products p
+     JOIN (SELECT product_id, COUNT(*) AS cnt FROM product_likes
+           WHERE product_id > {base} AND product_id <= {base} + {limit}
+           GROUP BY product_id) t ON t.product_id = p.id
+     SET p.like_count = t.cnt');
+
 -- 3주차 계약: 삭제된 브랜드의 상품은 모두 삭제 상태다. 삭제 브랜드 상품만 청크 없이 한 번에 바꾼다
 -- (기본 규모 약 2천 건, 1,000만 규모 약 20만 건).
 UPDATE products SET deleted = 1
@@ -171,6 +189,10 @@ UNION ALL SELECT 'violation:삭제 브랜드의 미삭제 상품', COUNT(*)
     FROM products p JOIN brands b ON b.id = p.brand_id WHERE b.deleted = 1 AND p.deleted = 0
 UNION ALL SELECT 'violation:없는 사용자의 좋아요', COUNT(*)
     FROM product_likes l LEFT JOIN users u ON u.id = l.user_id WHERE u.id IS NULL
+UNION ALL SELECT 'violation:like_count와 실제 좋아요 수가 다른 상품', COUNT(*)
+    FROM products p LEFT JOIN (SELECT product_id, COUNT(*) AS cnt FROM product_likes GROUP BY product_id) t
+        ON t.product_id = p.id
+    WHERE p.like_count <> COALESCE(t.cnt, 0)
 UNION ALL SELECT 'brand 1 products(deleted=false)', COUNT(*) FROM products WHERE brand_id = 1 AND deleted = 0
 UNION ALL SELECT 'brand 200 products(deleted=false)', COUNT(*) FROM products WHERE brand_id = 200 AND deleted = 0
 UNION ALL SELECT 'product 1 likes', COUNT(*) FROM product_likes WHERE product_id = 1;

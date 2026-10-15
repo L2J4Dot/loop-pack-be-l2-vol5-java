@@ -607,17 +607,18 @@ count_products() {
 DDL_TABLES="users brands products product_likes"
 DDL_TABLES_SQL="'users', 'brands', 'products', 'product_likes'"
 
-# 컬럼(이름·타입·NULL·extra)과 인덱스(유일 여부·컬럼 목록)를 이름과 무관하게 비교할 수 있는 형태로 출력한다.
+# 컬럼(이름·타입·NULL·기본값·extra)과 인덱스(유일 여부·컬럼 목록·정렬 방향)를 이름과 무관하게 비교할 수 있는 형태로 출력한다.
 # 컬럼 순서와 유일 제약 이름은 결과·실행 계획에 영향이 없어 비교에서 뺀다.
 schema_signature() {
     local db="$1"
     echo "SELECT CONCAT('column ', TABLE_NAME, '.', COLUMN_NAME, ' ', COLUMN_TYPE,
-                  IF(IS_NULLABLE = 'NO', ' NOT NULL', ' NULL'), IF(EXTRA = '', '', CONCAT(' ', EXTRA)))
+                  IF(IS_NULLABLE = 'NO', ' NOT NULL', ' NULL'),
+                  IF(COLUMN_DEFAULT IS NULL, '', CONCAT(' DEFAULT ', COLUMN_DEFAULT)), IF(EXTRA = '', '', CONCAT(' ', EXTRA)))
           FROM information_schema.COLUMNS
           WHERE TABLE_SCHEMA = '$db' AND TABLE_NAME IN ($DDL_TABLES_SQL)
           UNION ALL
           SELECT CONCAT('index ', TABLE_NAME, IF(INDEX_NAME = 'PRIMARY', ' PRIMARY', IF(NON_UNIQUE = 0, ' UNIQUE', ' INDEX')),
-                  ' (', GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX), ')')
+                  ' (', GROUP_CONCAT(CONCAT(COLUMN_NAME, IF(COLLATION = 'D', ' DESC', '')) ORDER BY SEQ_IN_INDEX), ')')
           FROM information_schema.STATISTICS
           WHERE TABLE_SCHEMA = '$db' AND TABLE_NAME IN ($DDL_TABLES_SQL)
           GROUP BY TABLE_NAME, INDEX_NAME, NON_UNIQUE;" | mysql_db --batch --skip-column-names | sort
