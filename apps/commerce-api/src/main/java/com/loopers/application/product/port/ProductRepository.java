@@ -22,4 +22,7 @@ public interface ProductRepository {
 
     // 브랜드에 연결된 미삭제 상품을 ID 오름차순으로 기본 키 행 잠금한 뒤, 잠근 상태에서도 미삭제인 상품만 반환한다.
     List<Product> findActiveByBrandIdForUpdate(BrandId brandId);
+
+    // like_count를 바꾸는 유일한 경로. 읽고-더하고-쓰지 않고 DB에서 원자적으로 더한다.
+    void adjustLikeCount(ProductId id, long delta);
 }

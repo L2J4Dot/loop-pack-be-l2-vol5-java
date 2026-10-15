@@ -16,15 +16,17 @@ public class LikePersistenceAdapter implements LikeRepository {
     public LikePersistenceAdapter(NamedParameterJdbcTemplate jdbc) { this.jdbc = jdbc; }
 
     @Override
-    public void save(Like like) {
-        jdbc.update("insert into product_likes(user_id, product_id) values (:u,:p) on duplicate key update user_id=user_id",
-            Map.of("u", like.userId(), "p", like.productId().value()));
+    public boolean save(Like like) {
+        // on duplicate key update는 드라이버 기본 설정(found rows)에서 중복이어도 영향 행 수 1을 돌려준다.
+        // INSERT IGNORE는 유일 키 중복이면 0을 돌려주므로 영향 행 수로 새 관계 여부를 판단할 수 있다.
+        return jdbc.update("insert ignore into product_likes(user_id, product_id) values (:u,:p)",
+            Map.of("u", like.userId(), "p", like.productId().value())) > 0;
     }
 
     @Override
-    public void delete(Like like) {
-        jdbc.update("delete from product_likes where user_id=:u and product_id=:p",
-            Map.of("u", like.userId(), "p", like.productId().value()));
+    public boolean delete(Like like) {
+        return jdbc.update("delete from product_likes where user_id=:u and product_id=:p",
+            Map.of("u", like.userId(), "p", like.productId().value())) > 0;
     }
 
     @Override

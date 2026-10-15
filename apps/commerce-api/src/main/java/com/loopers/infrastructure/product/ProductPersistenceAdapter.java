@@ -68,6 +68,15 @@ public class ProductPersistenceAdapter implements ProductRepository {
     }
 
     @Override
+    @Transactional
+    public void adjustLikeCount(ProductId id, long delta) {
+        entityManager.createNativeQuery("update products set like_count = like_count + :delta where id = :id")
+            .setParameter("delta", delta)
+            .setParameter("id", id.value())
+            .executeUpdate();
+    }
+
+    @Override
     public List<Product> findPage(int page, int size) {
         return productJpaRepository.findAll(PageRequest.of(page, size, Sort.by("id").descending()))
             .stream()

@@ -266,5 +266,10 @@ class BrandRemovalTransactionTest {
         public List<Product> findActiveByBrandIdForUpdate(BrandId brandId) {
             return delegate.findActiveByBrandIdForUpdate(brandId);
         }
+
+        @Override
+        public void adjustLikeCount(ProductId id, long delta) {
+            delegate.adjustLikeCount(id, delta);
+        }
     }
 }
