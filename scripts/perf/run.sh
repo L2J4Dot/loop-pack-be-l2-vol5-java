@@ -22,6 +22,14 @@
 #                API_REQUEST_TIMEOUTS 요청별 curl 제한(초). 예) "R3=60" — 넘으면 TIMEOUT으로 기록하고 그 요청은
 #                더 보내지 않으며(실패로 보지 않음), 남은 앱 쿼리는 KILL QUERY로 끊는다
 #                개선 전후 비교는 같은 계정·옵션(root, show-sql=false 등 app_args)으로 측정한다
+#                API_CACHE_MODE off(기본: 도구가 Redis를 건드리지 않음) | hit(워밍업이 채운 캐시를 읽음) | miss(요청마다 직전에
+#                버전 키 INCR, 측정 구간 밖) — hit·miss는 Redis 상태·요청당 Redis 명령 수를 함께 기록한다
+#                API_ONLY 측정할 요청만 고른다. 예) "R1 R2 R3" (기본: 전부)
+#   cache-fault  scripts/perf/run.sh cache-fault <label> stop|pause — R1을 워밍업 없이 FAULT_REQUESTS(20)회 보내며
+#                Redis 장애 중 응답·지연을 재고, 복구 후 첫 요청이 캐시를 다시 채우는지 확인한다. 끝나면(실패해도) 복구한다.
+#                FAULT_REF_LABEL(cache-off) 스냅샷과 응답을 비교한다.
+#   Redis        REDIS_CLI(기본: docker exec redis-master redis-cli), REDIS_STOP_CMD·REDIS_START_CMD·REDIS_PAUSE_CMD·
+#                REDIS_UNPAUSE_CMD(기본: compose의 redis-master·redis-readonly 컨테이너에 docker stop/start/pause/unpause)
 #   seed 규모    BRANDS(200) PRODUCTS(100000) LIKES(1000000) USERS(50000)
 #   seed 부하    CHUNK(100000, 청크마다 커밋) CHUNK_SLEEP(0, 청크 사이 쉬는 초)
 #   예) PRODUCTS=10000000 LIKES=10000000 CHUNK_SLEEP=0.2 scripts/perf/run.sh seed
@@ -50,6 +58,16 @@ API_SLOW_WARMUP="${API_SLOW_WARMUP:-1}"
 API_SLOW_REQUESTS="${API_SLOW_REQUESTS:-3}"
 API_REQUEST_TIMEOUTS="${API_REQUEST_TIMEOUTS:-}"
 CURL_MAX_TIME=900
+API_CACHE_MODE="${API_CACHE_MODE:-off}"
+API_ONLY="${API_ONLY:-}"
+REDIS_CLI="${REDIS_CLI:-docker exec redis-master redis-cli}"
+REDIS_STOP_CMD="${REDIS_STOP_CMD:-docker stop redis-master redis-readonly}"
+REDIS_START_CMD="${REDIS_START_CMD:-docker start redis-master redis-readonly}"
+REDIS_PAUSE_CMD="${REDIS_PAUSE_CMD:-docker pause redis-master redis-readonly}"
+REDIS_UNPAUSE_CMD="${REDIS_UNPAUSE_CMD:-docker unpause redis-master redis-readonly}"
+FAULT_REQUESTS="${FAULT_REQUESTS:-20}"
+FAULT_REF_LABEL="${FAULT_REF_LABEL:-cache-off}"
+CACHE_VERSION_KEY="products:list:version"
 BRANDS="${BRANDS:-200}"
 PRODUCTS="${PRODUCTS:-100000}"
 LIKES="${LIKES:-1000000}"
@@ -433,6 +451,41 @@ response_snapshot() {
     '
 }
 
+# ---------------------------------------------------------------- 캐시 측정용 Redis 도구 (측정용 키만 다룬다, FLUSHALL·KEYS 금지)
+redis_cmd() {
+    $REDIS_CLI "$@"
+}
+
+# 버전 값과 목록 키 수(SCAN으로 셈). 출력: "version=N keys=M"
+redis_state() {
+    local version keys
+    version="$(redis_cmd GET "$CACHE_VERSION_KEY" 2>/dev/null || echo '?')"
+    keys="$(redis_cmd --scan --pattern 'products:list:v[0-9]*' 2>/dev/null | grep -c . || true)"
+    echo "version=${version:-(없음)} keys=${keys:-?}"
+}
+
+# INFO commandstats를 "명령<TAB>호출 수"로 출력한다
+redis_cmdstats() {
+    redis_cmd INFO commandstats 2>/dev/null | tr -d '\r' \
+        | awk -F'[:,=]' '/^cmdstat_/ { sub(/^cmdstat_/, "", $1); print $1 "\t" $3 }'
+}
+
+# 두 commandstats의 차이를 요청 수로 나눠 "GET g / SET s / INCR i / 기타 o"로 출력한다. $4 = 도구가 보낸 INCR 수(빼야 함)
+redis_cmd_per_request() {
+    local before="$1" after="$2" n="$3" tool_incr="$4"
+    awk -F'\t' -v n="$n" -v tool="$tool_incr" '
+        NR == FNR { b[$1] = $2; next }
+        { d = $2 - b[$1]; if ($1 == "incr") d -= tool
+          if ($1 == "get" || $1 == "set" || $1 == "incr") v[$1] += d
+          else if ($1 != "info" && $1 != "scan" && $1 != "ping") other += d }
+        END { printf "GET %.1f / SET %.1f / INCR %.1f / 기타 %.1f", v["get"] / n, v["set"] / n, v["incr"] / n, other / n }
+    ' "$before" "$after"
+}
+
+bump_cache_version() {
+    redis_cmd INCR "$CACHE_VERSION_KEY" > /dev/null
+}
+
 # 앱 커넥션(기본 DB가 측정 DB)에서 5초 넘게 실행 중인 쿼리를 끊는다
 kill_app_queries() {
     local id
@@ -461,8 +514,12 @@ api_bench() {
     details="$work/details.txt"
     : > "$rows"
     : > "$details"
+    case "$API_CACHE_MODE" in
+        off | hit | miss) ;;
+        *) echo "[api-bench] API_CACHE_MODE는 off|hit|miss 중 하나다: $API_CACHE_MODE" >&2; exit 1 ;;
+    esac
 
-    local products_before products_after
+    local products_before products_after redis_before="" redis_after="" stats_before stats_after tool_incr list_select redis_per
     products_before="$(count_products)"
     echo "[api-bench] 시작 전 $PERF_DB.products: $products_before"
     if [ "${products_before:-0}" -eq 0 ]; then
@@ -473,7 +530,17 @@ api_bench() {
     start_app "$log"
 
     local name desc path first code secs warm_n n i ok fail stats sql_total sql_select sql_ms failed=0
+    if [ "$API_CACHE_MODE" != "off" ]; then
+        redis_before="$(redis_state)"
+        echo "[api-bench] 캐시 모드 $API_CACHE_MODE, 시작 전 Redis: $redis_before"
+    fi
+    stats_before="$work/cmdstats.before"
+    stats_after="$work/cmdstats.after"
+
     while IFS=$'\t' read -r name desc path; do
+        if [ -n "$API_ONLY" ] && ! printf ' %s ' "$API_ONLY" | grep -q " $name "; then
+            continue
+        fi
         echo "[api-bench] $name $path"
         times="$work/$name.times"
         digests="$work/$name.digests"
@@ -482,6 +549,7 @@ api_bench() {
         fail=0
 
         CURL_MAX_TIME="$(lookup "$API_REQUEST_TIMEOUTS" "$name" 900)"
+        [ "$API_CACHE_MODE" = "miss" ] && bump_cache_version
         first="$(one_request "$path" "$body")"
         code="${first%% *}"
         secs="${first#* }"
@@ -509,12 +577,20 @@ api_bench() {
             n="$API_REQUESTS"
         fi
         for ((i = 1; i < warm_n; i++)); do
+            [ "$API_CACHE_MODE" = "miss" ] && bump_cache_version
             code="$(one_request "$path" "$body" | cut -d' ' -f1)"
             [ "$code" = "200" ] || fail=$((fail + 1))
         done
 
         echo "TRUNCATE TABLE performance_schema.events_statements_summary_by_digest;" | perf_schema
+        tool_incr=0
+        [ "$API_CACHE_MODE" != "off" ] && redis_cmdstats > "$stats_before"
         for ((i = 0; i < n; i++)); do
+            if [ "$API_CACHE_MODE" = "miss" ]; then
+                # 측정 구간 밖에서 버전을 올려 다음 요청이 반드시 새 키(miss)를 보게 한다
+                bump_cache_version
+                tool_incr=$((tool_incr + 1))
+            fi
             first="$(one_request "$path" "$body")"
             code="${first%% *}"
             if [ "$code" = "200" ]; then
@@ -524,6 +600,7 @@ api_bench() {
             fi
             echo "${first#* }" >> "$times"
         done
+        [ "$API_CACHE_MODE" != "off" ] && redis_cmdstats > "$stats_after"
         echo "SELECT COUNT_STAR, ROUND(SUM_TIMER_WAIT / 1000000000, 2), LEFT(REPLACE(DIGEST_TEXT, '\`', ''), 160)
               FROM performance_schema.events_statements_summary_by_digest
               WHERE SCHEMA_NAME = '$PERF_DB' ORDER BY COUNT_STAR DESC, SUM_TIMER_WAIT DESC;" | perf_schema > "$digests"
@@ -535,8 +612,17 @@ api_bench() {
         sql_ms="$(awk -F'\t' -v n="$n" '{ t += $2 } END { printf "%.1f", t / n }' "$digests")"
         [ "$fail" -eq 0 ] || failed=$((failed + 1))
 
-        printf "| %s | %s | \`%s\` | %s | %s | %s | %s/%s | %s | %s | %s |\n" "$name" "$desc" "$path" "$warm_n" "$n" \
-            "$(echo "$stats" | sed 's/\t/ | /g')" "$ok" "$((n))" "$sql_total" "$sql_select" "$sql_ms" >> "$rows"
+        if [ "$API_CACHE_MODE" = "off" ]; then
+            printf "| %s | %s | \`%s\` | %s | %s | %s | %s/%s | %s | %s | %s |\n" "$name" "$desc" "$path" "$warm_n" "$n" \
+                "$(echo "$stats" | sed 's/\t/ | /g')" "$ok" "$((n))" "$sql_total" "$sql_select" "$sql_ms" >> "$rows"
+        else
+            # 목록 검색 SELECT(SELECT p.* FROM products p ...)가 측정 구간에 0이면 캐시 hit였다는 증거다
+            list_select="$(awk -F'\t' -v n="$n" '$3 ~ /^SELECT p \. \* FROM products p WHERE/ { c += $1 } END { printf "%.1f", c / n }' "$digests")"
+            redis_per="$(redis_cmd_per_request "$stats_before" "$stats_after" "$n" "$tool_incr")"
+            printf "| %s | %s | \`%s\` | %s | %s | %s | %s/%s | %s | %s | %s | %s | %s |\n" "$name" "$desc" "$path" "$warm_n" "$n" \
+                "$(echo "$stats" | sed 's/\t/ | /g')" "$ok" "$((n))" "$sql_total" "$sql_select" "$sql_ms" \
+                "$list_select" "$redis_per" >> "$rows"
+        fi
         CURL_MAX_TIME=900
         if [ "$fail" -ne 0 ]; then
             echo "[api-bench] $name: 200이 아닌 응답 ${fail}건 (워밍업 포함). 측정 실패로 본다." >&2
@@ -550,6 +636,10 @@ api_bench() {
 
     stop_app
     trap - EXIT INT TERM
+    if [ "$API_CACHE_MODE" != "off" ]; then
+        redis_after="$(redis_state)"
+        echo "[api-bench] 종료 후 Redis: $redis_after"
+    fi
 
     # 앱 기동이 측정 데이터를 지우지 않았는지 확인한다 (ddl-auto 덮어쓰기가 빠지면 create로 테이블이 다시 만들어진다)
     products_after="$(count_products)"
@@ -575,10 +665,20 @@ api_bench() {
         echo "  첫 요청이 ${API_SLOW_MS}ms를 넘으면 워밍업 ${API_SLOW_WARMUP}회 + 측정 ${API_SLOW_REQUESTS}회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다."
         echo "- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=$PERF_DB(앱 커넥션) 실행 수를 요청 수로 나눈 값"
         echo "- 응답 스냅샷: \`docs/week4/perf-results/$label/api-*.tsv\` (마지막 응답의 id·price·likeCount)"
+        if [ "$API_CACHE_MODE" != "off" ]; then
+            echo "- 캐시 모드: $API_CACHE_MODE $( [ "$API_CACHE_MODE" = "miss" ] && echo "(측정·워밍업 요청마다 직전에 INCR $CACHE_VERSION_KEY, 요청 시간 밖)" || echo "(워밍업이 채운 캐시를 읽음)")"
+            echo "- Redis 상태: 시작 전 $redis_before / 종료 후 $redis_after (목록 키 수는 SCAN으로 셈)"
+            echo "- 요청당 Redis 명령: 측정 구간 전후 INFO commandstats 차이 ÷ 표본 (도구가 보낸 INCR·INFO·SCAN 제외)"
+        fi
         data_lines
         echo
-        echo '| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) |'
-        echo '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+        if [ "$API_CACHE_MODE" = "off" ]; then
+            echo '| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) |'
+            echo '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+        else
+            echo '| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) | 요청당 목록 검색 SELECT | 요청당 Redis 명령 |'
+            echo '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |'
+        fi
         cat "$rows"
         echo
         echo '<details><summary>요청별 SQL digest</summary>'
@@ -672,12 +772,134 @@ ddl_check() {
     return "$result"
 }
 
+# ---------------------------------------------------------------- cache-fault
+FAULT_RECOVER_CMD=""
+
+fault_cleanup() {
+    if [ -n "$FAULT_RECOVER_CMD" ]; then
+        echo "[cache-fault] Redis 복구: $FAULT_RECOVER_CMD"
+        $FAULT_RECOVER_CMD > /dev/null 2>&1 || true
+        FAULT_RECOVER_CMD=""
+    fi
+    stop_app
+}
+
+wait_redis() {
+    local i
+    for ((i = 0; i < 60; i++)); do
+        if [ "$(redis_cmd PING 2>/dev/null)" = "PONG" ]; then
+            echo "$i"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "-1"
+    return 1
+}
+
+# 응답 본문이 기준 스냅샷과 같은지 (id·price·likeCount). 빈 목록·가격 0이면 다르다고 본다.
+same_as_ref() {
+    local body="$1" ref="$2"
+    [ -f "$ref" ] && cmp -s <(response_snapshot "$body") "$ref"
+}
+
+cache_fault() {
+    local label="${1:?측정 이름을 지정하세요. 예: cache-redis-stop}" mode="${2:?stop|pause}"
+    local doc="$ROOT_DIR/docs/week4/query-performance-raw.md"
+    local out_dir="$RESULTS_DIR/$label" ref="$RESULTS_DIR/$FAULT_REF_LABEL/api-R1.tsv"
+    local path="/api/v1/products?brandId=1&sort=price_asc&page=0&size=20"
+    local work log body times codes i r code same=0 ok=0 fault_cmd recover_cmd
+    local state_before state_after_recover warn_lines redis_wait refill="" refill_tries=0 key version stats
+    case "$mode" in
+        stop) fault_cmd="$REDIS_STOP_CMD"; recover_cmd="$REDIS_START_CMD" ;;
+        pause) fault_cmd="$REDIS_PAUSE_CMD"; recover_cmd="$REDIS_UNPAUSE_CMD" ;;
+        *) echo "[cache-fault] 모드는 stop|pause: $mode" >&2; exit 1 ;;
+    esac
+    [ -f "$ref" ] || { echo "[cache-fault] 기준 스냅샷이 없다: ${ref#$ROOT_DIR/}" >&2; exit 1; }
+    mkdir -p "$out_dir"
+    work="$(mktemp -d)"
+    log="$work/app.log"
+    body="$work/body.json"
+    times="$work/times"
+    codes="$work/codes"
+    : > "$times"
+    : > "$codes"
+    [ "$(count_products)" -gt 0 ] || { echo "[cache-fault] $PERF_DB.products가 비어 있다." >&2; exit 1; }
+
+    start_app "$log"
+    trap fault_cleanup EXIT INT TERM
+    # 장애 전: 정상 상태에서 R1을 한 번 보내 캐시를 채워 둔다
+    one_request "$path" "$body" > /dev/null
+    state_before="$(redis_state)"
+    echo "[cache-fault] 장애 전 Redis: $state_before"
+
+    echo "[cache-fault] 장애 주입: $fault_cmd"
+    FAULT_RECOVER_CMD="$recover_cmd"
+    $fault_cmd > /dev/null
+    for ((i = 0; i < FAULT_REQUESTS; i++)); do
+        r="$(one_request "$path" "$body")"
+        code="${r%% *}"
+        echo "$code" >> "$codes"
+        echo "${r#* }" >> "$times"
+        [ "$code" = "200" ] && ok=$((ok + 1))
+        if [ "$code" = "200" ] && same_as_ref "$body" "$ref"; then
+            same=$((same + 1))
+        fi
+    done
+    response_snapshot "$body" > "$out_dir/api-R1.tsv"
+    stats="$(percentiles_ms < "$times")"
+
+    echo "[cache-fault] 복구: $recover_cmd"
+    $recover_cmd > /dev/null
+    FAULT_RECOVER_CMD=""
+    redis_wait="$(wait_redis || true)"
+    # 복구 후: 요청을 보내며 현재 버전의 R1 목록 키가 다시 생기는지 확인한다(최대 10회)
+    for ((i = 1; i <= 10; i++)); do
+        r="$(one_request "$path" "$body")"
+        version="$(redis_cmd GET "$CACHE_VERSION_KEY" 2>/dev/null)"
+        key="products:list:v${version:-0}:brand=1:sort=price_asc:page=0:size=20"
+        if [ "$(redis_cmd EXISTS "$key" 2>/dev/null)" = "1" ]; then
+            refill="${i}번째 요청 후 재채움 (${r%% *}, ${r#* }초, 키 $key)"
+            refill_tries=$i
+            break
+        fi
+        sleep 0.5
+    done
+    [ -n "$refill" ] || refill="10회 안에 재채움 확인 못 함"
+    state_after_recover="$(redis_state)"
+    warn_lines="$(grep -c '상품 목록 캐시' "$log" || true)"
+    stop_app
+    trap - EXIT INT TERM
+
+    {
+        echo
+        echo "## 캐시 장애 측정: $label (Redis $mode, $(date '+%Y-%m-%d %H:%M'))"
+        echo
+        env_line
+        echo "- 앱: commerce-api local 프로필 + 명령행 인자 \`$(app_args | tr '\n' ' ' | sed "s/password=[^ ]*/password=***/")\`"
+        echo "- 방식: 정상 상태에서 R1 1회로 캐시를 채운 뒤 \`$fault_cmd\` → R1을 워밍업 없이 ${FAULT_REQUESTS}회 순차 요청 → \`$recover_cmd\`"
+        echo "- 응답 비교 기준: \`perf-results/$FAULT_REF_LABEL/api-R1.tsv\` (id·price·likeCount 순서, 빈 목록·가격 0이면 다름)"
+        echo "- Redis 상태: 장애 전 $state_before / 복구 후 $state_after_recover"
+        echo "- 복구: Redis 응답까지 ${redis_wait}초, $refill"
+        echo "- 앱 로그의 캐시 경고(\"상품 목록 캐시\") 줄 수: $warn_lines"
+        data_lines
+        echo
+        echo '| 상태 | 요청 | 200 응답 | 기준과 같은 응답 | p50 | p95 | p99 | 최대 | 응답 코드 |'
+        echo '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |'
+        printf "| Redis %s | %s | %s | %s | %s | %s |\n" "$mode" "$FAULT_REQUESTS" "$ok" "$same" \
+            "$(echo "$stats" | sed 's/\t/ | /g')" "$(sort "$codes" | uniq -c | awk '{ printf "%s×%s ", $2, $1 }')"
+    } >> "$doc"
+    rm -rf "$work"
+    echo "[cache-fault] 완료: 'Redis $mode' 200 응답 $ok/$FAULT_REQUESTS, 기준과 같음 $same, p50/p95/p99/최대 $(echo "$stats" | tr '\t' '/')ms, $refill"
+}
+
 case "${1:-}" in
     seed) seed ;;
     bench) shift; bench "$@" ;;
     compare) shift; compare "$@" ;;
     api-bench) shift; api_bench "$@" ;;
     ddl-check) ddl_check ;;
+    cache-fault) shift; cache_fault "$@" ;;
     *)
         sed -n '2,/^set -euo/p' "$0" | sed '$d'
         exit 1
