@@ -857,3 +857,499 @@ SELECT product_id, count(*) AS total FROM product_likes WHERE product_id IN (1) 
 ```
 
 </details>
+
+
+## 측정: after-index (2026-10-15 22:11)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 27G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 방식: 쿼리별 워밍업 1회 후 '실행 횟수'만큼 실행, SHOW PROFILES의 서버 실행 시간(ms).
+  기본 제한 30000ms, 워밍업이 10000ms 이상이면 3회만 실행. 쿼리별 제한: Q6_likes_all=60000 Q7_likes_brand=60000
+- 결과 스냅샷: `docs/week4/perf-results/after-index/sql-*.tsv`
+- 데이터: users 50000 / brands 200 (삭제 5) / products 100000 (미삭제 92859) / product_likes 974368
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 95MB(인덱스 52MB) / products 27MB(인덱스 18MB) / users 2MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 쿼리 | 설명 | 실행 횟수 | 평균 | 중앙값 | 최소 | 최대 | type | key | rows(예상) | Extra |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | --- |
+| Q1_latest_all | 전체 상품 최신순 1페이지 | 10 | 0.19 | 0.13 | 0.11 | 0.57 | index | idx_products_created | 20 | Using where |
+| Q2_latest_brand | 큰 브랜드(1) 최신순 1페이지 | 10 | 0.64 | 0.58 | 0.39 | 1.15 | index | idx_products_created | 1158 | Using where |
+| Q3_price_all | 전체 상품 가격 낮은순 1페이지 | 10 | 0.26 | 0.23 | 0.19 | 0.47 | index | idx_products_price | 20 | Using where |
+| Q4_price_brand | 큰 브랜드(1) 가격 낮은순 1페이지 | 10 | 0.72 | 0.67 | 0.49 | 1.22 | ref | idx_products_brand_price | 13076 | Using where |
+| Q5_latest_deep_page | 전체 최신순 깊은 페이지 (page=2500, size=20) | 10 | 77.96 | 64.88 | 52.10 | 192.99 | ALL | NULL | 99694 | Using where; Using filesort |
+| Q6_likes_all | 전체 상품 좋아요순 1페이지 | 10 | 0.22 | 0.19 | 0.12 | 0.41 | index | idx_products_likes | 20 | Using where |
+| Q7_likes_brand | 큰 브랜드(1) 좋아요순 1페이지 | 10 | 0.65 | 0.57 | 0.46 | 1.45 | ref | idx_products_brand_likes | 13076 | Using where |
+| Q8_likes_small_brand | 작은 브랜드(200) 좋아요순 1페이지 | 10 | 0.23 | 0.22 | 0.17 | 0.43 | ref | idx_products_brand_likes | 245 | Using where |
+| Q9_like_count_page | 목록 1페이지 상품 20개의 좋아요 수 일괄 조회 (findLikeCounts) | 10 | 0.19 | 0.17 | 0.11 | 0.40 | range | PRIMARY | 20 | Using where |
+| Q10_like_count_detail | 상품 상세의 좋아요 수 (인기 상품 1) | 10 | 0.09 | 0.07 | 0.06 | 0.22 | const | PRIMARY | 1 | NULL |
+
+<details><summary>실행 계획 상세 (EXPLAIN / EXPLAIN ANALYZE)</summary>
+
+```text
+-- ==================== Q1_latest_all: 전체 상품 최신순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key                  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | NULL          | idx_products_created | 16      | NULL |   20 |    50.00 | Using where |
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=1.03 rows=10) (actual time=0.0672..0.0992 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=1.03 rows=10) (actual time=0.0665..0.0976 rows=20 loops=1)
+        -> Index scan on p using idx_products_created  (cost=1.03 rows=20) (actual time=0.065..0.0943 rows=21 loops=1)
+
+
+-- ==================== Q2_latest_brand: 큰 브랜드(1) 최신순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+------------------------------------------------------------------------------+----------------------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys                                                                | key                  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+------------------------------------------------------------------------------+----------------------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | idx_products_brand_price,idx_products_brand_created,idx_products_brand_likes | idx_products_created | 16      | NULL | 1158 |     6.56 | Using where |
++----+-------------+-------+------------+-------+------------------------------------------------------------------------------+----------------------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=4.84 rows=20) (actual time=0.213..0.372 rows=20 loops=1)
+    -> Filter: ((p.brand_id = 1) and (p.deleted = false))  (cost=4.84 rows=75.9) (actual time=0.212..0.371 rows=20 loops=1)
+        -> Index scan on p using idx_products_created  (cost=4.84 rows=1158) (actual time=0.206..0.358 rows=218 loops=1)
+
+
+-- ==================== Q3_price_all: 전체 상품 가격 낮은순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.price asc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key                | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | NULL          | idx_products_price | 16      | NULL |   20 |    50.00 | Using where |
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=1.03 rows=10) (actual time=0.069..0.0962 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=1.03 rows=10) (actual time=0.0679..0.094 rows=20 loops=1)
+        -> Index scan on p using idx_products_price  (cost=1.03 rows=20) (actual time=0.0664..0.0911 rows=20 loops=1)
+
+
+-- ==================== Q4_price_brand: 큰 브랜드(1) 가격 낮은순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY p.price asc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys                                                                | key                      | key_len | ref   | rows  | filtered | Extra       |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | ref  | idx_products_brand_price,idx_products_brand_created,idx_products_brand_likes | idx_products_brand_price | 8       | const | 13076 |    50.00 | Using where |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=1063 rows=20) (actual time=0.513..0.517 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=1063 rows=6538) (actual time=0.512..0.515 rows=20 loops=1)
+        -> Index lookup on p using idx_products_brand_price (brand_id=1)  (cost=1063 rows=13076) (actual time=0.506..0.51 rows=33 loops=1)
+
+
+-- ==================== Q5_latest_deep_page: 전체 최신순 깊은 페이지 (page=2500, size=20)
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 50000;
+
+-- EXPLAIN
++----+-------------+-------+------------+------+---------------+------+---------+------+-------+----------+-----------------------------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows  | filtered | Extra                       |
++----+-------------+-------+------------+------+---------------+------+---------+------+-------+----------+-----------------------------+
+|  1 | SIMPLE      | p     | NULL       | ALL  | NULL          | NULL | NULL    | NULL | 99694 |    50.00 | Using where; Using filesort |
++----+-------------+-------+------------+------+---------------+------+---------+------+-------+----------+-----------------------------+
+-- EXPLAIN ANALYZE
+-> Limit/Offset: 20/50000 row(s)  (cost=10106 rows=20) (actual time=61.8..61.8 rows=20 loops=1)
+    -> Sort: p.created_at DESC, p.id DESC, limit input to 50020 row(s) per chunk  (cost=10106 rows=99694) (actual time=57.7..60.4 rows=50020 loops=1)
+        -> Filter: (p.deleted = false)  (cost=10106 rows=99694) (actual time=0.092..27.9 rows=92859 loops=1)
+            -> Table scan on p  (cost=10106 rows=99694) (actual time=0.09..21.9 rows=100000 loops=1)
+
+
+-- ==================== Q6_likes_all: 전체 상품 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.like_count desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key                | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | NULL          | idx_products_likes | 16      | NULL |   20 |    50.00 | Using where |
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=1.03 rows=10) (actual time=0.0708..0.0991 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=1.03 rows=10) (actual time=0.0702..0.0976 rows=20 loops=1)
+        -> Index scan on p using idx_products_likes  (cost=1.03 rows=20) (actual time=0.068..0.0936 rows=25 loops=1)
+
+
+-- ==================== Q7_likes_brand: 큰 브랜드(1) 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY p.like_count desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys                                                                | key                      | key_len | ref   | rows  | filtered | Extra       |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | ref  | idx_products_brand_price,idx_products_brand_created,idx_products_brand_likes | idx_products_brand_likes | 8       | const | 13076 |    50.00 | Using where |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=1063 rows=20) (actual time=0.487..0.493 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=1063 rows=6538) (actual time=0.486..0.491 rows=20 loops=1)
+        -> Index lookup on p using idx_products_brand_likes (brand_id=1)  (cost=1063 rows=13076) (actual time=0.484..0.487 rows=21 loops=1)
+
+
+-- ==================== Q8_likes_small_brand: 작은 브랜드(200) 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=200 ORDER BY p.like_count desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys                                                                | key                      | key_len | ref   | rows | filtered | Extra       |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | ref  | idx_products_brand_price,idx_products_brand_created,idx_products_brand_likes | idx_products_brand_likes | 8       | const |  245 |    50.00 | Using where |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=73.5 rows=20) (actual time=0.0708..0.0762 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=73.5 rows=122) (actual time=0.0703..0.0746 rows=20 loops=1)
+        -> Index lookup on p using idx_products_brand_likes (brand_id=200)  (cost=73.5 rows=245) (actual time=0.0688..0.0716 rows=21 loops=1)
+
+
+-- ==================== Q9_like_count_page: 목록 1페이지 상품 20개의 좋아요 수 일괄 조회 (findLikeCounts)
+SELECT p.id AS product_id, p.like_count AS total FROM products p WHERE p.id IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20);
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+---------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key     | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+---------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | range | PRIMARY       | PRIMARY | 8       | NULL |   20 |   100.00 | Using where |
++----+-------------+-------+------------+-------+---------------+---------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Filter: (p.id in (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20))  (cost=9.02 rows=20) (actual time=0.0264..0.0415 rows=20 loops=1)
+    -> Index range scan on p using PRIMARY over (id = 1) OR (id = 2) OR (18 more)  (cost=9.02 rows=20) (actual time=0.025..0.0381 rows=20 loops=1)
+
+
+-- ==================== Q10_like_count_detail: 상품 상세의 좋아요 수 (인기 상품 1)
+SELECT p.id AS product_id, p.like_count AS total FROM products p WHERE p.id IN (1);
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+---------+---------+-------+------+----------+-------+
+| id | select_type | table | partitions | type  | possible_keys | key     | key_len | ref   | rows | filtered | Extra |
++----+-------------+-------+------------+-------+---------------+---------+---------+-------+------+----------+-------+
+|  1 | SIMPLE      | p     | NULL       | const | PRIMARY       | PRIMARY | 8       | const |    1 |   100.00 | NULL  |
++----+-------------+-------+------------+-------+---------------+---------+---------+-------+------+----------+-------+
+-- EXPLAIN ANALYZE
+-> Rows fetched before execution  (cost=0..0 rows=1) (actual time=81e-6..149e-6 rows=1 loops=1)
+
+
+```
+
+</details>
+
+## API 측정: after-index (2026-10-15 22:11)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 27G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+  개선 후(after) 측정도 같은 계정(root)·옵션으로 실행해야 비교할 수 있다.
+- 데이터 보존 확인: loopers_perf.products 시작 전 100000 / 종료 후 100000
+- 방식: curl 순차 1개, X-USER-ID: 1. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank).
+  첫 요청이 5000ms를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다.
+- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=loopers_perf(앱 커넥션) 실행 수를 요청 수로 나눈 값
+- 응답 스냅샷: `docs/week4/perf-results/after-index/api-*.tsv` (마지막 응답의 id·price·likeCount)
+- 데이터: users 50000 / brands 200 (삭제 5) / products 100000 (미삭제 92859) / product_likes 974368
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 95MB(인덱스 52MB) / products 27MB(인덱스 18MB) / users 2MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| R1 | 브랜드 1 가격순 1페이지 (과제 측정 대상) | `/api/v1/products?brandId=1&sort=price_asc&page=0&size=20` | 20 | 200 | 14.6 | 25.5 | 35.7 | 37.7 | 200/200 | 14.0 | 4.0 | 2.2 |
+| R2 | 브랜드 200 가격순 1페이지 | `/api/v1/products?brandId=200&sort=price_asc&page=0&size=20` | 20 | 200 | 9.6 | 15.8 | 18.9 | 33.5 | 200/200 | 14.0 | 4.0 | 1.7 |
+| R3 | 브랜드 200 좋아요순 1페이지 | `/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` | 20 | 200 | 7.8 | 14.1 | 17.3 | 25.1 | 200/200 | 14.0 | 4.0 | 1.6 |
+| R4 | 상품 1 상세 | `/api/v1/products/1` | 20 | 200 | 6.8 | 11.6 | 23.4 | 29.9 | 200/200 | 14.0 | 4.0 | 1.3 |
+
+<details><summary>요청별 SQL digest</summary>
+
+```text
+-- R1 /api/v1/products?brandId=1&sort=price_asc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	41.32	SET autocommit = ?
+400	26.73	SET SESSION TRANSACTION READ ONLY
+400	25.64	COMMIT
+400	14.51	SET SESSION TRANSACTION READ WRITE
+200	168.38	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+200	58.11	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	56.50	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	42.18	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R2 /api/v1/products?brandId=200&sort=price_asc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	47.12	SET autocommit = ?
+400	23.45	COMMIT
+400	23.31	SET SESSION TRANSACTION READ ONLY
+400	11.63	SET SESSION TRANSACTION READ WRITE
+200	78.65	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+200	60.85	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	58.54	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	35.65	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R3 /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	46.46	SET autocommit = ?
+400	26.97	SET SESSION TRANSACTION READ ONLY
+400	22.31	COMMIT
+400	16.02	SET SESSION TRANSACTION READ WRITE
+200	69.49	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . like_count DESC , p . id DESC LIMIT ? OFFSET ?
+200	53.01	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	50.25	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	37.38	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R4 /api/v1/products/1 (요청 200회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+800	44.24	SET autocommit = ?
+400	31.20	SET SESSION TRANSACTION READ ONLY
+400	21.85	COMMIT
+400	12.02	SET SESSION TRANSACTION READ WRITE
+200	40.39	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+200	39.19	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+200	37.45	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+200	36.49	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+```
+
+</details>
+
+## 측정: after-index-10m (2026-10-15 22:17)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 24G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 방식: 쿼리별 워밍업 1회 후 '실행 횟수'만큼 실행, SHOW PROFILES의 서버 실행 시간(ms).
+  기본 제한 30000ms, 워밍업이 10000ms 이상이면 3회만 실행. 쿼리별 제한: Q6_likes_all=60000 Q7_likes_brand=60000 Q8_likes_small_brand=60000
+- 결과 스냅샷: `docs/week4/perf-results/after-index-10m/sql-*.tsv`
+- 데이터: users 500000 / brands 200 (삭제 5) / products 10000000 (미삭제 9293588) / product_likes 9969594
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 957MB(인덱스 522MB) / products 2504MB(인덱스 1694MB) / users 15MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 쿼리 | 설명 | 실행 횟수 | 평균 | 중앙값 | 최소 | 최대 | type | key | rows(예상) | Extra |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | --- |
+| Q1_latest_all | 전체 상품 최신순 1페이지 | 10 | 0.18 | 0.16 | 0.10 | 0.45 | index | idx_products_created | 20 | Using where |
+| Q2_latest_brand | 큰 브랜드(1) 최신순 1페이지 | 10 | 1.17 | 1.04 | 0.95 | 2.15 | index | idx_products_created | 981 | Using where |
+| Q3_price_all | 전체 상품 가격 낮은순 1페이지 | 10 | 0.26 | 0.24 | 0.20 | 0.42 | index | idx_products_price | 20 | Using where |
+| Q4_price_brand | 큰 브랜드(1) 가격 낮은순 1페이지 | 10 | 1.12 | 1.07 | 0.89 | 1.52 | ref | idx_products_brand_price | 1420280 | Using where |
+| Q5_latest_deep_page | 전체 최신순 깊은 페이지 (page=2500, size=20) | 10 | 445.35 | 447.89 | 405.84 | 485.45 | index | idx_products_created | 50020 | Using where |
+| Q6_likes_all | 전체 상품 좋아요순 1페이지 | 10 | 0.17 | 0.14 | 0.12 | 0.40 | index | idx_products_likes | 20 | Using where |
+| Q7_likes_brand | 큰 브랜드(1) 좋아요순 1페이지 | 10 | 0.77 | 0.60 | 0.50 | 1.79 | ref | idx_products_brand_likes | 1420280 | Using where |
+| Q8_likes_small_brand | 작은 브랜드(200) 좋아요순 1페이지 | 10 | 1.39 | 1.23 | 0.90 | 2.36 | ref | idx_products_brand_likes | 50556 | Using where |
+| Q9_like_count_page | 목록 1페이지 상품 20개의 좋아요 수 일괄 조회 (findLikeCounts) | 10 | 0.16 | 0.12 | 0.11 | 0.35 | range | PRIMARY | 20 | Using where |
+| Q10_like_count_detail | 상품 상세의 좋아요 수 (인기 상품 1) | 10 | 0.13 | 0.10 | 0.07 | 0.30 | const | PRIMARY | 1 | NULL |
+
+<details><summary>실행 계획 상세 (EXPLAIN / EXPLAIN ANALYZE)</summary>
+
+```text
+-- ==================== Q1_latest_all: 전체 상품 최신순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key                  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | NULL          | idx_products_created | 16      | NULL |   20 |    50.00 | Using where |
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=1.1 rows=10) (actual time=0.115..0.172 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=1.1 rows=10) (actual time=0.115..0.17 rows=20 loops=1)
+        -> Index scan on p using idx_products_created  (cost=1.1 rows=20) (actual time=0.112..0.166 rows=22 loops=1)
+
+
+-- ==================== Q2_latest_brand: 큰 브랜드(1) 최신순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+------------------------------------------------------------------------------+----------------------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys                                                                | key                  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+------------------------------------------------------------------------------+----------------------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | idx_products_brand_price,idx_products_brand_created,idx_products_brand_likes | idx_products_created | 16      | NULL |  981 |     7.13 | Using where |
++----+-------------+-------+------------+-------+------------------------------------------------------------------------------+----------------------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=14.7 rows=20) (actual time=0.534..1.44 rows=20 loops=1)
+    -> Filter: ((p.brand_id = 1) and (p.deleted = false))  (cost=14.7 rows=70) (actual time=0.533..1.43 rows=20 loops=1)
+        -> Index scan on p using idx_products_created  (cost=14.7 rows=981) (actual time=0.525..1.41 rows=248 loops=1)
+
+
+-- ==================== Q3_price_all: 전체 상품 가격 낮은순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.price asc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key                | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | NULL          | idx_products_price | 16      | NULL |   20 |    50.00 | Using where |
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=1.1 rows=10) (actual time=0.127..0.185 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=1.1 rows=10) (actual time=0.126..0.183 rows=20 loops=1)
+        -> Index scan on p using idx_products_price  (cost=1.1 rows=20) (actual time=0.123..0.179 rows=22 loops=1)
+
+
+-- ==================== Q4_price_brand: 큰 브랜드(1) 가격 낮은순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY p.price asc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+---------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys                                                                | key                      | key_len | ref   | rows    | filtered | Extra       |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+---------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | ref  | idx_products_brand_price,idx_products_brand_created,idx_products_brand_likes | idx_products_brand_price | 8       | const | 1420280 |    50.00 | Using where |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+---------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=220521 rows=20) (actual time=1.89..1.9 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=220521 rows=710140) (actual time=1.89..1.89 rows=20 loops=1)
+        -> Index lookup on p using idx_products_brand_price (brand_id=1)  (cost=220521 rows=1.42e+6) (actual time=1.88..1.89 rows=31 loops=1)
+
+
+-- ==================== Q5_latest_deep_page: 전체 최신순 깊은 페이지 (page=2500, size=20)
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.created_at desc, p.id desc LIMIT 20 OFFSET 50000;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+-------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key                  | key_len | ref  | rows  | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+-------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | NULL          | idx_products_created | 16      | NULL | 50020 |    50.00 | Using where |
++----+-------------+-------+------------+-------+---------------+----------------------+---------+------+-------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit/Offset: 20/50000 row(s)  (cost=2761 rows=0) (actual time=481..485 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=2761 rows=25010) (actual time=5.79..483 rows=50020 loops=1)
+        -> Index scan on p using idx_products_created  (cost=2761 rows=50020) (actual time=5.79..479 rows=53807 loops=1)
+
+
+-- ==================== Q6_likes_all: 전체 상품 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false ORDER BY p.like_count desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key                | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | index | NULL          | idx_products_likes | 16      | NULL |   20 |    50.00 | Using where |
++----+-------------+-------+------------+-------+---------------+--------------------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=1.1 rows=10) (actual time=0.0934..0.132 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=1.1 rows=10) (actual time=0.0926..0.13 rows=20 loops=1)
+        -> Index scan on p using idx_products_likes  (cost=1.1 rows=20) (actual time=0.0906..0.126 rows=25 loops=1)
+
+
+-- ==================== Q7_likes_brand: 큰 브랜드(1) 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=1 ORDER BY p.like_count desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+---------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys                                                                | key                      | key_len | ref   | rows    | filtered | Extra       |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+---------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | ref  | idx_products_brand_price,idx_products_brand_created,idx_products_brand_likes | idx_products_brand_likes | 8       | const | 1420280 |    50.00 | Using where |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+---------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=219838 rows=20) (actual time=0.458..0.464 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=219838 rows=710140) (actual time=0.457..0.462 rows=20 loops=1)
+        -> Index lookup on p using idx_products_brand_likes (brand_id=1)  (cost=219838 rows=1.42e+6) (actual time=0.454..0.458 rows=21 loops=1)
+
+
+-- ==================== Q8_likes_small_brand: 작은 브랜드(200) 좋아요순 1페이지
+SELECT p.* FROM products p WHERE p.deleted=false AND p.brand_id=200 ORDER BY p.like_count desc, p.id desc LIMIT 20 OFFSET 0;
+
+-- EXPLAIN
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys                                                                | key                      | key_len | ref   | rows  | filtered | Extra       |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | ref  | idx_products_brand_price,idx_products_brand_created,idx_products_brand_likes | idx_products_brand_likes | 8       | const | 50556 |    50.00 | Using where |
++----+-------------+-------+------------+------+------------------------------------------------------------------------------+--------------------------+---------+-------+-------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Limit: 20 row(s)  (cost=50955 rows=20) (actual time=1.55..1.56 rows=20 loops=1)
+    -> Filter: (p.deleted = false)  (cost=50955 rows=25278) (actual time=1.55..1.55 rows=20 loops=1)
+        -> Index lookup on p using idx_products_brand_likes (brand_id=200)  (cost=50955 rows=50556) (actual time=1.54..1.55 rows=21 loops=1)
+
+
+-- ==================== Q9_like_count_page: 목록 1페이지 상품 20개의 좋아요 수 일괄 조회 (findLikeCounts)
+SELECT p.id AS product_id, p.like_count AS total FROM products p WHERE p.id IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20);
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+---------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type  | possible_keys | key     | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+-------+---------------+---------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | p     | NULL       | range | PRIMARY       | PRIMARY | 8       | NULL |   20 |   100.00 | Using where |
++----+-------------+-------+------------+-------+---------------+---------+---------+------+------+----------+-------------+
+-- EXPLAIN ANALYZE
+-> Filter: (p.id in (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20))  (cost=23.2 rows=20) (actual time=0.0393..0.0666 rows=20 loops=1)
+    -> Index range scan on p using PRIMARY over (id = 1) OR (id = 2) OR (18 more)  (cost=23.2 rows=20) (actual time=0.0376..0.063 rows=20 loops=1)
+
+
+-- ==================== Q10_like_count_detail: 상품 상세의 좋아요 수 (인기 상품 1)
+SELECT p.id AS product_id, p.like_count AS total FROM products p WHERE p.id IN (1);
+
+-- EXPLAIN
++----+-------------+-------+------------+-------+---------------+---------+---------+-------+------+----------+-------+
+| id | select_type | table | partitions | type  | possible_keys | key     | key_len | ref   | rows | filtered | Extra |
++----+-------------+-------+------------+-------+---------------+---------+---------+-------+------+----------+-------+
+|  1 | SIMPLE      | p     | NULL       | const | PRIMARY       | PRIMARY | 8       | const |    1 |   100.00 | NULL  |
++----+-------------+-------+------------+-------+---------------+---------+---------+-------+------+----------+-------+
+-- EXPLAIN ANALYZE
+-> Rows fetched before execution  (cost=0..0 rows=1) (actual time=88e-6..160e-6 rows=1 loops=1)
+
+
+```
+
+</details>
+
+## API 측정: after-index-10m (2026-10-15 22:18)
+
+- 환경: Linux 6.18.44-fc-v114 (x86_64) / CPU Intel(R) Xeon(R) Processor @ 2.10GHz, 2코어 / 메모리 8GB / MySQL 8.0.46-0ubuntu0.24.04.4 / Java: openjdk version "21.0.12.1" 2026-08-18
+- 디스크 여유: 24G (MySQL 데이터 디렉터리) / buffer pool 128MB
+- 앱: commerce-api local 프로필 + 명령행 인자 `--spring.profiles.active=local --spring.jpa.hibernate.ddl-auto=none --spring.jpa.show-sql=false --datasource.mysql-jpa.main.jdbc-url=jdbc:mysql://localhost:3306/loopers_perf --datasource.mysql-jpa.main.username=root --datasource.mysql-jpa.main.password=*** --server.port=8080 `
+  개선 후(after) 측정도 같은 계정(root)·옵션으로 실행해야 비교할 수 있다.
+- 데이터 보존 확인: loopers_perf.products 시작 전 10000000 / 종료 후 10000000
+- 방식: curl 순차 1개, X-USER-ID: 1. 워밍업 후 측정 요청의 time_total 백분위(ms, nearest-rank).
+  첫 요청이 99999999ms를 넘으면 워밍업 1회 + 측정 3회로 줄인다. 표의 '표본'이 요청별 실제 측정 수다.
+- 요청당 SQL: 측정 직전 events_statements_summary_by_digest를 비우고, 측정 후 SCHEMA_NAME=loopers_perf(앱 커넥션) 실행 수를 요청 수로 나눈 값
+- 응답 스냅샷: `docs/week4/perf-results/after-index-10m/api-*.tsv` (마지막 응답의 id·price·likeCount)
+- 데이터: users 500000 / brands 200 (삭제 5) / products 10000000 (미삭제 9293588) / product_likes 9969594
+- 테이블 크기(데이터+인덱스): brands 0MB(인덱스 0MB) / product_likes 957MB(인덱스 522MB) / products 2504MB(인덱스 1694MB) / users 15MB(인덱스 0MB)
+- 인덱스: brands.PRIMARY(id), product_likes.idx_product_likes_product(product_id), product_likes.PRIMARY(id), product_likes.uk_product_likes_user_product(user_id,product_id), products.idx_products_brand_created(brand_id,created_at), products.idx_products_brand_likes(brand_id,like_count,id), products.idx_products_brand_price(brand_id,price,id), products.idx_products_created(created_at,id), products.idx_products_likes(like_count,id), products.idx_products_price(price,id), products.PRIMARY(id), users.PRIMARY(id)
+
+| 요청 | 설명 | 경로 | 워밍업 | 표본 | p50 | p95 | p99 | 최대 | 200 응답 | 요청당 SQL | 요청당 SELECT | 요청당 SQL 시간(ms) |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| R1 | 브랜드 1 가격순 1페이지 (과제 측정 대상) | `/api/v1/products?brandId=1&sort=price_asc&page=0&size=20` | 3 | 30 | 24.6 | 43.8 | 51.3 | 51.3 | 30/30 | 14.0 | 4.0 | 3.1 |
+| R2 | 브랜드 200 가격순 1페이지 | `/api/v1/products?brandId=200&sort=price_asc&page=0&size=20` | 3 | 30 | 19.6 | 34.6 | 37.4 | 37.4 | 30/30 | 14.0 | 4.0 | 3.4 |
+| R3 | 브랜드 200 좋아요순 1페이지 | `/api/v1/products?brandId=200&sort=likes_desc&page=0&size=20` | 3 | 30 | 15.3 | 28.5 | 33.4 | 33.4 | 30/30 | 14.0 | 4.0 | 3.5 |
+| R4 | 상품 1 상세 | `/api/v1/products/1` | 3 | 30 | 12.3 | 19.9 | 22.4 | 22.4 | 30/30 | 14.0 | 4.0 | 1.3 |
+
+<details><summary>요청별 SQL digest</summary>
+
+```text
+-- R1 /api/v1/products?brandId=1&sort=price_asc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	7.45	SET autocommit = ?
+60	4.66	SET SESSION TRANSACTION READ ONLY
+60	4.37	COMMIT
+60	3.04	SET SESSION TRANSACTION READ WRITE
+30	45.94	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+30	10.49	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	8.94	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	6.89	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R2 /api/v1/products?brandId=200&sort=price_asc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	6.53	SET autocommit = ?
+60	7.14	SET SESSION TRANSACTION READ ONLY
+60	3.94	COMMIT
+60	2.83	SET SESSION TRANSACTION READ WRITE
+30	53.22	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . price ASC , p . id DESC LIMIT ? OFFSET ?
+30	10.75	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	9.87	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	6.90	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R3 /api/v1/products?brandId=200&sort=likes_desc&page=0&size=20 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	7.57	SET autocommit = ?
+60	5.86	SET SESSION TRANSACTION READ ONLY
+60	4.42	COMMIT
+60	3.73	SET SESSION TRANSACTION READ WRITE
+30	54.86	SELECT p . * FROM products p WHERE p . deleted = FALSE AND p . brand_id = ? ORDER BY p . like_count DESC , p . id DESC LIMIT ? OFFSET ?
+30	13.91	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	10.38	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+30	5.52	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+
+-- R4 /api/v1/products/1 (요청 30회 동안 앱 커넥션이 실행한 SQL: 실행 수 / 총 시간 ms / digest)
+120	5.28	SET autocommit = ?
+60	4.56	SET SESSION TRANSACTION READ ONLY
+60	3.28	COMMIT
+60	2.00	SET SESSION TRANSACTION READ WRITE
+30	6.83	SELECT pje1_0 . id , pje1_0 . brand_id , pje1_0 . created_at , pje1_0 . deleted , pje1_0 . like_count , pje1_0 . name , pje1_0 . price , pje1_0 . stock FROM pro
+30	6.15	SELECT COUNT ( * ) FROM users uje1_0 WHERE uje1_0 . id = ?
+30	6.06	SELECT bje1_0 . id , bje1_0 . deleted , bje1_0 . name FROM brands bje1_0 WHERE bje1_0 . id IN (...)
+30	4.84	SELECT pje1_0 . id , pje1_0 . like_count FROM products pje1_0 WHERE pje1_0 . id IN (...)
+
+```
+
+</details>

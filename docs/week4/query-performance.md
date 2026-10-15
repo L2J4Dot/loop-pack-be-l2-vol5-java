@@ -224,31 +224,153 @@ SELECT product_id, count(*) FROM product_likes WHERE product_id IN (...) GROUP B
 - 그래도 테이블보다 작은 인덱스만 읽으면 되므로(`Using index`, 커버링 인덱스), 옵티마이저는 테이블 대신 인덱스 전체 스캔을 고른다.
 - 목록 조회 때마다 이 집계가 실행되므로, 목록 API 한 번에 Q1~Q4 중 하나와 Q9의 비용이 함께 든다. 상세 조회도 마찬가지로 Q10 비용이 든다.
 
-## 4. 개선 후 결과
+## 4. 개선 후 결과 (2026-10-15, 인덱스 + like_count)
 
-> 개선을 적용한 뒤 같은 환경·계정·인자로 `run.sh bench`·`api-bench`를 실행하고 `run.sh compare baseline <label>`로 결과가 같은지 먼저 확인한다. 결과가 다른 항목은 비교하지 않는다.
+> 2절 baseline과 같은 클라우드 환경·계정·인자로 측정했다. 비교 전에 `run.sh compare`로 결과가 같은지 먼저 확인했고, 결과가 다른 항목은 없었다.
 
-**요청 단위**
+- 적용한 것: 설계 문서 17절 인덱스(products 보조 인덱스 6개, `product_likes(product_id)`)와 18절 좋아요 수 비정규화(`products.like_count`). 코드 `ede83af`
+- 앱: `commerce-api` bootJar(`ede83af`)를 2절과 같은 인자(root, `ddl-auto=none`, `show-sql=false`)로 기동
+- `ddl-check`: Hibernate가 만든 스키마와 `seed.sql` 스키마 차이 없음. **`@Index`의 `DESC`가 실제 DDL에 반영됨을 확인**(`id DESC`, `created_at DESC` 등, 설계 20절 미확인 사항 해소)
+- 데이터: 2절과 같은 seed(고정 시드) + `like_count` 초기 채우기. 검증: `like_count`와 실제 좋아요 수가 다른 상품 0건 (10만·1,000만 모두)
+- SQL 단위 쿼리: Q1~Q5는 그대로, **Q6~Q10은 현재 앱 SQL로 바뀌었다**(좋아요순 → `ORDER BY like_count DESC, id DESC`, 좋아요 수 → `SELECT id, like_count FROM products WHERE id IN (...)`). 이름·스냅샷 형식은 유지해 개선 전 결과와 비교한다. 개선 전 SQL은 원본 기록의 baseline 섹션에 남아 있다.
+- 원본: [query-performance-raw.md](query-performance-raw.md)의 `측정: after-index`·`API 측정: after-index`(10만), `측정: after-index-10m`·`API 측정: after-index-10m`(1,000만). 스냅샷 `perf-results/after-index/`, `perf-results/after-index-10m/`
 
-| 요청 | 10만 baseline p50 / p95 | 10만 개선 후 | 1,000만 baseline p50 / p95 | 1,000만 개선 후 | 요청당 SQL 시간 10만 / 1,000만 (전 → 후) | 결과 일치 | 적용한 것 |
-| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| R1 브랜드 1 가격순 | 153.6 / 170.9ms | | 3,771.0 / 3,941.0ms | | 135.2ms → / 3,745.3ms → | | |
-| R2 브랜드 200 가격순 | 147.5 / 167.2ms | | 3,716.6 / 3,980.1ms | | 134.5ms → / 3,720.0ms → | | |
-| R3 브랜드 200 좋아요순 | 19,459 / 19,737ms | | TIMEOUT(>60s) | | 19,411ms → / - | | |
-| R4 상품 1 상세 | 96.5 / 109.1ms | | 1,036.2 / 1,104.8ms | | 85.9ms → / 1,000.2ms → | | |
+### 4.1 after-index (10만)
 
-**SQL 단위**
+**요청 단위** (curl 순차 1개, `X-USER-ID: 1`, 모든 응답 200, 측정 전후 products 100,000건 유지)
 
-| 쿼리 | 10만 baseline 평균 | 10만 개선 후 | 1,000만 baseline 평균 | 1,000만 개선 후 | 실행 계획 변화 (type·key·rows·정렬) |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Q4 가격순 (브랜드 1) | 23.7ms | | 2,545.8ms | | |
-| Q8 좋아요순 (브랜드 200) | 19,213ms | | TIMEOUT(>60s) | | |
-| Q9 좋아요 수 20개 | 102.8ms | | 1,247.1ms | | |
-| Q10 좋아요 수 1개 | 86.0ms | | 1,016.6ms | | |
+| 요청 | 워밍업 / 표본 | p50 | p95 | p99 | 최대 | 요청당 SQL (SELECT) | 요청당 SQL 시간 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **R1** 브랜드 1 가격순 (과제 대상) | 20 / 200 | **14.6ms** | **25.5ms** | 35.7ms | 37.7ms | **14 (4)** | 2.2ms |
+| R2 브랜드 200 가격순 | 20 / 200 | 9.6ms | 15.8ms | 18.9ms | 33.5ms | 14 (4) | 1.7ms |
+| R3 브랜드 200 좋아요순 | 20 / 200 | 7.8ms | 14.1ms | 17.3ms | 25.1ms | 14 (4) | 1.6ms |
+| R4 상품 1 상세 | 20 / 200 | 6.8ms | 11.6ms | 23.4ms | 29.9ms | 14 (4) | 1.3ms |
 
-> 1,000만 규모는 R1·R2·R4 표본이 30이라 p99는 기록만 하고 p50·p95로 비교한다.
+- R3는 baseline에서 1회 약 19.5초라 워밍업 1 + 측정 3이었지만, 이제 5초 기준에 걸리지 않아 R1과 같은 20 + 200으로 측정됐다.
+- 요청당 SQL 수는 14개(SELECT 4개 + 트랜잭션 제어문 10개)로 그대로다. 좋아요 수 집계 SELECT가 `like_count` 조회 SELECT로 **바뀌었을 뿐 개수는 같다**.
 
-트레이드오프(쓰기 비용, 인덱스 용량, 정합성)는 개선 방식을 정한 뒤 정리한다.
+**SQL 단위** (서버 실행 시간 평균, 모두 10회)
+
+| 쿼리 | 평균 | type | key | Extra |
+| --- | ---: | --- | --- | --- |
+| Q1 최신순 (전체) | 0.19ms | index | idx_products_created | Using where |
+| Q2 최신순 (브랜드 1) | 0.64ms | index | idx_products_created | Using where |
+| Q3 가격순 (전체) | 0.26ms | index | idx_products_price | Using where |
+| **Q4** 가격순 (브랜드 1) | **0.72ms** | ref | idx_products_brand_price | Using where |
+| Q5 깊은 페이지 | 77.96ms | ALL | NULL | Using where; Using filesort |
+| Q6 좋아요순 (전체) | 0.22ms | index | idx_products_likes | Using where |
+| Q7 좋아요순 (브랜드 1) | 0.65ms | ref | idx_products_brand_likes | Using where |
+| Q8 좋아요순 (브랜드 200) | 0.23ms | ref | idx_products_brand_likes | Using where |
+| **Q9** 좋아요 수 20개 | **0.19ms** | range | PRIMARY | Using where |
+| Q10 좋아요 수 1개 | 0.09ms | const | PRIMARY | - |
+
+- 테이블 크기(데이터+인덱스): products 27MB(인덱스 18MB), product_likes 95MB(인덱스 52MB), users 2MB
+
+### 4.2 after-index-10m (1,000만)
+
+**요청 단위** (워밍업 3 + 측정 30 고정, R3는 curl 60초 제한, 모든 응답 200, 측정 전후 products 10,000,000건 유지)
+
+| 요청 | 워밍업 / 표본 | p50 | p95 | p99¹ | 최대 | 요청당 SQL (SELECT) | 요청당 SQL 시간 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **R1** 브랜드 1 가격순 (과제 대상) | 3 / 30 | **24.6ms** | **43.8ms** | 51.3ms | 51.3ms | **14 (4)** | 3.1ms |
+| R2 브랜드 200 가격순 | 3 / 30 | 19.6ms | 34.6ms | 37.4ms | 37.4ms | 14 (4) | 3.4ms |
+| R3 브랜드 200 좋아요순 | 3 / 30 | 15.3ms | 28.5ms | 33.4ms | 33.4ms | 14 (4) | 3.5ms |
+| R4 상품 1 상세 | 3 / 30 | 12.3ms | 19.9ms | 22.4ms | 22.4ms | 14 (4) | 1.3ms |
+
+¹ 표본 30이라 p99는 기록만 한다.
+
+**SQL 단위** (서버 실행 시간 평균, 모두 10회, Q6~Q8 제한 60초)
+
+| 쿼리 | 평균 | type | key | rows(예상) | Extra |
+| --- | ---: | --- | --- | ---: | --- |
+| Q1 최신순 (전체) | 0.18ms | index | idx_products_created | 20 | Using where |
+| Q2 최신순 (브랜드 1) | 1.17ms | index | idx_products_created | 981 | Using where |
+| Q3 가격순 (전체) | 0.26ms | index | idx_products_price | 20 | Using where |
+| **Q4** 가격순 (브랜드 1) | **1.12ms** | ref | idx_products_brand_price | 1,420,280 | Using where |
+| Q5 깊은 페이지 | 445.35ms | index | idx_products_created | 50,020 | Using where |
+| Q6 좋아요순 (전체) | 0.17ms | index | idx_products_likes | 20 | Using where |
+| Q7 좋아요순 (브랜드 1) | 0.77ms | ref | idx_products_brand_likes | 1,420,280 | Using where |
+| Q8 좋아요순 (브랜드 200) | 1.39ms | ref | idx_products_brand_likes | 50,556 | Using where |
+| **Q9** 좋아요 수 20개 | **0.16ms** | range | PRIMARY | 20 | Using where |
+| Q10 좋아요 수 1개 | 0.13ms | const | PRIMARY | 1 | - |
+
+- `rows(예상)`은 옵티마이저가 조건에 맞는다고 추정한 행 수다. `LIMIT 20`이라 실제로는 정렬된 인덱스에서 앞의 20건만 읽고 멈춘다(실제 읽은 행은 원본의 `EXPLAIN ANALYZE` 참고).
+- 테이블 크기(데이터+인덱스): products 2,504MB(인덱스 1,694MB), product_likes 957MB(인덱스 522MB), users 15MB
+- seed 5분 52초(인덱스 6개를 데이터 적재 후 한 번에 생성, 부록 A.3), bench 12초, api-bench 26초
+
+### 4.3 개선 전후 비교
+
+**결과 일치** (`run.sh compare`)
+
+| 비교 | 같음 | 다름 | 비교 불가 |
+| --- | ---: | ---: | --- |
+| `baseline` ↔ `after-index` (10만) | 12 | 0 | 2 (Q6·Q7: 개선 전 TIMEOUT) |
+| `baseline-10m` ↔ `after-index-10m` (1,000만) | 10 | 0 | 4 (Q6·Q7·Q8·R3: 개선 전 TIMEOUT) |
+
+- **좋아요순 결과는 10만 규모 Q8·R3로 같음을 확인했다.** 종속 서브쿼리로 매번 센 순서와 `like_count`로 정렬한 순서·좋아요 수가 같다.
+
+**요청 단위** (p50 / p95)
+
+| 요청 | 10만 개선 전 | 10만 개선 후 | 배율(p50) | 1,000만 개선 전 | 1,000만 개선 후 | 배율(p50) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **R1** 브랜드 1 가격순 | 153.6 / 170.9ms | **14.6 / 25.5ms** | 10.5배 | 3,771.0 / 3,941.0ms | **24.6 / 43.8ms** | 153배 |
+| R2 브랜드 200 가격순 | 147.5 / 167.2ms | 9.6 / 15.8ms | 15배 | 3,716.6 / 3,980.1ms | 19.6 / 34.6ms | 190배 |
+| R3 브랜드 200 좋아요순 | 19,459 / 19,737ms (표본 3) | 7.8 / 14.1ms | 약 2,500배 | TIMEOUT(>60s) | 15.3 / 28.5ms | 측정 불가 → 15ms |
+| R4 상품 1 상세 | 96.5 / 109.1ms | 6.8 / 11.6ms | 14배 | 1,036.2 / 1,104.8ms | 12.3 / 19.9ms | 84배 |
+
+**요청당 SQL 시간** (요청당 SQL 수는 전후 모두 14개)
+
+| 요청 | 10만 전 → 후 | 1,000만 전 → 후 |
+| --- | ---: | ---: |
+| R1 | 135.2 → 2.2ms | 3,745.3 → 3.1ms |
+| R2 | 134.5 → 1.7ms | 3,720.0 → 3.4ms |
+| R3 | 19,411 → 1.6ms | - → 3.5ms |
+| R4 | 85.9 → 1.3ms | 1,000.2 → 1.3ms |
+
+**R1의 SQL 시간 구성** (요청당)
+
+| SQL | 10만 전 → 후 | 1,000만 전 → 후 |
+| --- | ---: | ---: |
+| 상품 조회 (Q4 형태) | 약 23 → 0.84ms | 약 2,552 → 1.53ms |
+| 좋아요 수 (집계 → `like_count` 조회) | 약 110 → 0.29ms | 약 1,191 → 0.30ms |
+| 사용자 확인·브랜드 조회 | 0.58 → 0.49ms | 1.01 → 0.58ms |
+| 트랜잭션 제어문 10개 | 0.87 → 0.54ms | 0.94 → 0.65ms |
+
+> 개선 전 값은 baseline 원본의 digest 총 시간 ÷ 요청 수다(1절 표의 "사용자 확인·브랜드 조회 약 2ms"는 트랜잭션 제어문까지 묶은 값).
+
+**SQL 단위** (서버 실행 시간 평균)
+
+| 쿼리 | 10만 전 → 후 | 1,000만 전 → 후 | 실행 계획 변화 (1,000만 기준) |
+| --- | ---: | ---: | --- |
+| Q1 최신순 (전체) | 28.2 → 0.19ms | 3,303.8 → 0.18ms | ALL + filesort → index `idx_products_created` |
+| Q2 최신순 (브랜드 1) | 23.1 → 0.64ms | 2,591.5 → 1.17ms | ALL + filesort → index `idx_products_created`² |
+| Q3 가격순 (전체) | 22.9 → 0.26ms | 3,166.1 → 0.26ms | ALL + filesort → index `idx_products_price` |
+| **Q4** 가격순 (브랜드 1) | **23.7 → 0.72ms** | **2,545.8 → 1.12ms** | ALL + filesort → ref `idx_products_brand_price`, filesort 없음 |
+| Q5 깊은 페이지 | 58.9 → 77.96ms | 6,456.3 → 445.35ms | 10만: 그대로 ALL + filesort³ / 1,000만: index `idx_products_created` |
+| Q6 좋아요순 (전체) | TIMEOUT → 0.22ms | TIMEOUT → 0.17ms | 종속 서브쿼리 → index `idx_products_likes` |
+| Q7 좋아요순 (브랜드 1) | TIMEOUT → 0.65ms | TIMEOUT → 0.77ms | 종속 서브쿼리 → ref `idx_products_brand_likes` |
+| Q8 좋아요순 (브랜드 200) | 19,213 → 0.23ms | TIMEOUT → 1.39ms | 종속 서브쿼리 → ref `idx_products_brand_likes` |
+| **Q9** 좋아요 수 20개 | **102.8 → 0.19ms** | **1,247.1 → 0.16ms** | product_likes 인덱스 전체 스캔 → products PK range |
+| Q10 좋아요 수 1개 | 86.0 → 0.09ms | 1,016.6 → 0.13ms | product_likes 인덱스 전체 스캔 → products PK const |
+
+² Q2는 브랜드용 `idx_products_brand_created`가 아니라 전체용 `idx_products_created`를 골랐다(10만·1,000만 모두). 결과는 같고 1ms 안팎으로 빠르다.
+³ Q5는 개선 대상이 아니다(설계 15절, 깊은 페이지는 선택 심화). 10만의 77.96ms는 최대 193ms 튐이 평균을 올린 값이고 중앙값은 64.9ms(개선 전 57.1ms)로 비슷하다.
+
+**공간 비용** (테이블 데이터+인덱스)
+
+| 테이블 | 10만 전 → 후 | 1,000만 전 → 후 |
+| --- | ---: | ---: |
+| products | 8 → 27MB (인덱스 18MB) | 724 → 2,504MB (인덱스 1,694MB) |
+| product_likes | 71 → 95MB (인덱스 52MB) | 720 → 957MB (인덱스 522MB) |
+
+- 1,000만 기준 인덱스 때문에 약 2GB가 늘었다. products는 데이터(약 810MB)보다 보조 인덱스 6개(1,694MB)가 두 배 크다.
+- 이 크기는 데이터를 다 넣은 뒤 인덱스를 한 번에 만든(정렬 후 순서대로 쌓은) 값이다. 운영처럼 행이 하나씩 들어오며 인덱스가 자라면 페이지가 덜 채워져 더 크다. 같은 10만 데이터에서 행마다 끼워 넣어 만든 첫 시도는 products 45MB(인덱스 37MB)로, 한 번에 만든 경우(27MB, 인덱스 18MB)의 약 2배였다.
+
+**정리**
+
+- R1(과제 대상)은 10만에서 153.6 → 14.6ms, 1,000만에서 3,771 → 24.6ms(p50)로 줄었다. SQL 시간은 2~3ms로 데이터 규모와 거의 무관해졌다(1,000만: 3,745 → 3.1ms).
+- 이제 R1 응답 시간(10만 14.6ms)에서 SQL은 2.2ms(약 15%)뿐이다. **나머지 약 12ms는 SQL 밖**(HTTP 처리·JSON 변환·트랜잭션 2개와 SQL 14번의 왕복)이라, 인덱스를 더 손봐도 줄일 여지가 거의 없다.
+- 1,000만의 p50(24.6ms)이 10만(14.6ms)보다 큰 차이는 SQL 시간 차이(약 1ms)로는 설명되지 않는다. 1,000만은 워밍업 3회·표본 30이라 JIT·커넥션이 덜 데워진 영향이 섞여 있다. SQL과 무관한 R4도 같은 비율(6.8 → 12.3ms)로 차이가 난다.
 
 ## 5. 측정 환경과 방법
 
@@ -419,6 +541,9 @@ FROM perf_seq WHERE n < {limit};
 | 위 방식 + 청크 사이 0.3초 휴식 | 2분 57초 |
 
 > 기본 설정에서는 정렬 삽입을 해도 redo 로그 경고가 일부 남는다. 에러가 아니라 MySQL이 쓰기 속도를 잠시 조절한다는 뜻이다. 생성된 데이터 크기는 약 1.5GB다 (products 724MB, product_likes 720MB).
+
+**보조 인덱스는 적재 후 한 번에 만든다 (2026-10-15 추가).** 인덱스 6개를 붙인 채 1,000만 건을 넣으면 행마다 인덱스 6개의 무작위 위치에 끼워 넣어야 해서, 인덱스가 버퍼 풀(128MB)보다 커진 뒤로 청크당 50초 넘게 걸렸다(1시간 이상 예상).
+그래서 seed는 테이블을 새로 만든 뒤 보조 인덱스를 떼고 데이터를 넣고, `like_count`를 채운 뒤 `ALTER TABLE ... ADD INDEX`로 한 번에 만든다(정렬 후 순서대로 쌓기). 1,000만 seed가 5분 52초로 끝났다. 최종 스키마는 `CREATE TABLE`과 같고 `ddl-check`로 확인한다.
 
 ## 부록 B. 참고 측정: seed 규칙 보강 전 10만·1,000만 규모
 
