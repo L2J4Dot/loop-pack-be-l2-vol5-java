@@ -26,7 +26,8 @@ SET SESSION autocommit = 1;
 --   Instant → datetime(6), String(length=100) → varchar(100). 모든 컬럼이 NOT NULL이다.
 -- 차이: product_likes 유일 제약 이름은 Hibernate가 임의 이름(UK...)을 붙이므로 여기서만 이름을 정했다.
 -- like_count(@ColumnDefault 0)와 보조 인덱스는 엔티티의 @Index와 같은 이름·열·정렬 방향으로 만든다(설계 17·18절).
--- 이미 있는 테이블은 그대로 쓴다(인덱스 상태는 측정 결과에 함께 기록된다).
+-- 테이블은 매번 지우고 새로 만든다. 예전 seed로 만든 테이블(like_count·인덱스 없음)이 남아 있어도 현재 스키마로 맞춰진다.
+DROP TABLE IF EXISTS product_likes, products, brands, users;
 CREATE TABLE IF NOT EXISTS users (
     id         BIGINT       NOT NULL,
     PRIMARY KEY (id)
@@ -66,12 +67,13 @@ CREATE TABLE IF NOT EXISTS product_likes (
     KEY idx_product_likes_product (product_id)
 ) ENGINE = InnoDB;
 
-SET FOREIGN_KEY_CHECKS = 0;
-TRUNCATE TABLE product_likes;
-TRUNCATE TABLE products;
-TRUNCATE TABLE brands;
-TRUNCATE TABLE users;
-SET FOREIGN_KEY_CHECKS = 1;
+-- 대량 삽입 동안은 보조 인덱스를 떼어 둔다. 행마다 6개 보조 인덱스의 무작위 위치에 끼워 넣으면
+-- 인덱스가 버퍼 풀(128MB)보다 커지는 순간부터 디스크 읽기가 폭증한다(1,000만 규모에서 청크당 50초 이상).
+-- 데이터를 다 넣은 뒤 한 번에 만들면 정렬 후 순서대로 쌓아(sorted index build) 훨씬 빠르다. 최종 스키마는 위 CREATE TABLE과 같다.
+ALTER TABLE products
+    DROP INDEX idx_products_brand_price, DROP INDEX idx_products_brand_created, DROP INDEX idx_products_created,
+    DROP INDEX idx_products_price, DROP INDEX idx_products_brand_likes, DROP INDEX idx_products_likes;
+ALTER TABLE product_likes DROP INDEX idx_product_likes_product;
 
 -- 청크 크기만큼의 숫자 시퀀스 (0 ~ chunk-1)
 DROP TABLE IF EXISTS perf_digits;
@@ -159,6 +161,9 @@ SET @perf_sql = CONCAT(
      ORDER BY t.user_id, t.product_id');
 CALL perf_fill('product_likes', @perf_likes, 3, @perf_sql);
 
+-- 좋아요 수 채우기에 product_id 범위 읽기가 필요해 이 인덱스를 먼저 만든다.
+ALTER TABLE product_likes ADD INDEX idx_product_likes_product (product_id);
+
 -- 좋아요 수 초기 채우기 (설계 18절): 상품 id 구간마다 짧은 트랜잭션으로 실제 관계 수를 like_count에 넣는다.
 -- 구간 집계는 product_likes(product_id) 인덱스 범위를 읽고, 좋아요가 없는 상품은 기본값 0을 그대로 둔다.
 CALL perf_fill('like_count', @perf_products, 5,
@@ -172,6 +177,15 @@ CALL perf_fill('like_count', @perf_products, 5,
 -- (기본 규모 약 2천 건, 1,000만 규모 약 20만 건).
 UPDATE products SET deleted = 1
 WHERE deleted = 0 AND brand_id IN (SELECT id FROM brands WHERE deleted = 1);
+
+-- 떼어 둔 상품 보조 인덱스를 한 번에 만든다 (위 CREATE TABLE과 같은 이름·열·정렬 방향).
+ALTER TABLE products
+    ADD INDEX idx_products_brand_price (brand_id, price ASC, id DESC),
+    ADD INDEX idx_products_brand_created (brand_id, created_at),
+    ADD INDEX idx_products_created (created_at DESC, id DESC),
+    ADD INDEX idx_products_price (price ASC, id DESC),
+    ADD INDEX idx_products_brand_likes (brand_id, like_count DESC, id DESC),
+    ADD INDEX idx_products_likes (like_count DESC, id DESC);
 
 DROP PROCEDURE perf_fill;
 DROP TABLE perf_seq;

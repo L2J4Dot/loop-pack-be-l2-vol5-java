@@ -201,8 +201,8 @@ data_lines() {
           ' (미삭제 ', (SELECT COUNT(*) FROM products WHERE deleted = 0), ') / product_likes ',
           (SELECT COUNT(*) FROM product_likes));" | mysql_db --batch --skip-column-names "$PERF_DB"
     echo -n "- 테이블 크기(데이터+인덱스): "
-    echo "SELECT GROUP_CONCAT(CONCAT(TABLE_NAME, ' ', ROUND((DATA_LENGTH + INDEX_LENGTH) / 1048576), 'MB')
-                 ORDER BY TABLE_NAME SEPARATOR ' / ')
+    echo "SELECT GROUP_CONCAT(CONCAT(TABLE_NAME, ' ', ROUND((DATA_LENGTH + INDEX_LENGTH) / 1048576), 'MB',
+                 '(인덱스 ', ROUND(INDEX_LENGTH / 1048576), 'MB)') ORDER BY TABLE_NAME SEPARATOR ' / ')
           FROM information_schema.TABLES
           WHERE TABLE_SCHEMA = '$PERF_DB' AND TABLE_NAME IN ('users', 'brands', 'products', 'product_likes');" \
         | mysql_db --batch --skip-column-names "$PERF_DB"
