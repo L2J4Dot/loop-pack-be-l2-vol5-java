@@ -5,8 +5,6 @@ import com.loopers.domain.like.Like;
 import com.loopers.domain.product.ProductId;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
-import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -27,16 +25,6 @@ public class LikePersistenceAdapter implements LikeRepository {
     public boolean delete(Like like) {
         return jdbc.update("delete from product_likes where user_id=:u and product_id=:p",
             Map.of("u", like.userId(), "p", like.productId().value())) > 0;
-    }
-
-    @Override
-    public Map<ProductId, Long> countByProductIds(Collection<ProductId> ids) {
-        Map<ProductId, Long> result = new HashMap<>();
-        if (ids.isEmpty()) { return result; }
-        jdbc.query("select product_id, count(*) as total from product_likes where product_id in (:ids) group by product_id",
-            Map.of("ids", ids.stream().map(ProductId::value).toList()), (org.springframework.jdbc.core.RowCallbackHandler) rs ->
-                result.put(new ProductId(rs.getLong("product_id")), rs.getLong("total")));
-        return result;
     }
 
     @Override

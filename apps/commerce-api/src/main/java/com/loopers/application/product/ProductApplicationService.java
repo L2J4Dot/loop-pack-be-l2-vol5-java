@@ -95,7 +95,7 @@ public class ProductApplicationService {
         List<BrandId> brandIds = found.stream().map(Product::getBrandId).distinct().toList();
         Map<BrandId, String> brandNames = brandRepository.findAllByIds(brandIds).stream()
             .collect(Collectors.toMap(Brand::getId, Brand::getName));
-        Map<ProductId, Long> likeCounts = likeRepository.countByProductIds(found.stream().map(Product::getId).toList());
+        Map<ProductId, Long> likeCounts = productRepository.findLikeCounts(found.stream().map(Product::getId).toList());
         return found.stream()
             .map(product -> new CustomerProductResult(product.getId().value(), product.getName(), product.getPrice().value(),
                 product.getStock().value(), product.getBrandId().value(), brandNames.get(product.getBrandId()),
