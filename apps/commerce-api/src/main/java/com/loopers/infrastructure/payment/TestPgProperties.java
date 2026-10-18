@@ -4,7 +4,6 @@ import java.net.URI;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-// 테스트 PG 연결 설정(설계 21절). 값이 빠지면 시작에 실패한다.
 @ConfigurationProperties("payment.providers.test-pg")
 public record TestPgProperties(URI baseUrl, String userId, String callbackUrl, Duration connectTimeout, Duration readTimeout) {
     public TestPgProperties {

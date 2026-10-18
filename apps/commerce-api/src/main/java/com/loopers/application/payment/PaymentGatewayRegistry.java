@@ -7,8 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-// providerId → PG 어댑터와 설정 우선순위 목록(설계 21절). PG 전환·재시도 판단은 하지 않는다.
-// 어댑터와 우선순위 설정이 정확히 일치하지 않으면 생성(애플리케이션 시작)을 거절해 잘못된 설정이 실행 중에 드러나지 않게 한다.
+// 어댑터와 우선순위 설정이 정확히 일치하지 않으면 시작을 거절한다. 잘못된 설정이 결제 도중에 드러나지 않게 하기 위해서다.
 public class PaymentGatewayRegistry {
     private final Map<String, PaymentGateway> gateways;
     private final List<PaymentGateway> priorityOrder;

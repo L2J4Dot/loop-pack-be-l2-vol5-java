@@ -27,8 +27,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
-// 과제 테스트 PG 어댑터(설계 21절). PG 응답을 포트의 결과로 옮기기만 하고 재시도·fallback·다른 PG 호출을 하지 않는다.
-// 응답 본문은 카드 번호를 되돌려줄 수 있으므로 결과·로그에 옮기지 않고 상태 코드·원인 타입만 남긴다.
+// 응답 본문은 카드 번호를 되돌려줄 수 있으므로 결과·로그에는 상태 코드·원인 타입만 남긴다.
 @Slf4j
 @Component
 public class TestPgPaymentGateway implements PaymentGateway {
@@ -74,7 +73,7 @@ public class TestPgPaymentGateway implements PaymentGateway {
         try {
             body = objectMapper.writeValueAsBytes(requestBody(command));
         } catch (JsonProcessingException e) {
-            // 직렬화 실패는 요청을 보내기 전이다. 예외 메시지에 본문(카드 번호)이 섞이지 않도록 원인 타입만 남긴다.
+            // 보내기 전 실패라 미발송이다. 예외 메시지에 카드 번호가 섞일 수 있어 원인 타입만 남긴다.
             return notSent("요청 본문 생성 실패: " + e.getClass().getSimpleName(), command);
         }
         try {
@@ -97,7 +96,7 @@ public class TestPgPaymentGateway implements PaymentGateway {
             log.warn("테스트 PG 결제 생성 결과를 알 수 없습니다. orderId={}, reason={}", command.providerOrderId(), reason);
             return new PaymentCreateResult.Unknown(reason);
         } catch (RuntimeException e) {
-            // 예상하지 못한 예외는 요청이 나갔는지 판단할 수 없으므로 결과 모름이다.
+            // 요청이 나갔는지 판단할 수 없으므로 결과 모름이다.
             String reason = e.getClass().getSimpleName();
             log.warn("테스트 PG 결제 생성 결과를 알 수 없습니다. orderId={}, reason={}", command.providerOrderId(), reason);
             return new PaymentCreateResult.Unknown(reason);
@@ -154,12 +153,8 @@ public class TestPgPaymentGateway implements PaymentGateway {
         }
     }
 
-    // 요청 바이트가 PG로 나가지 않았음이 확실한 경우만 true다.
-    // - ConnectException: JDK HttpClient가 TCP 연결 수립에 실패했을 때(연결 거부 등) 던진다.
-    // - HttpConnectTimeoutException: connectTimeout 안에 연결을 수립하지 못했을 때 던진다.
-    //   HttpTimeoutException(read timeout)의 하위 타입이므로 상위 타입으로 판단하지 않는다.
-    // 그 밖의 IOException(read timeout, 연결 후 끊김, 요청 취소 등)은 요청이 나갔을 수 있어 false다.
-    // RestClient는 IOException을 ResourceAccessException의 직접 원인으로 감싸므로 직접 원인만 본다.
+    // 연결 수립 실패만 미발송으로 본다. read timeout·연결 후 끊김은 요청이 나갔을 수 있다.
+    // HttpConnectTimeoutException은 read timeout 예외(HttpTimeoutException)의 하위 타입이므로 상위 타입으로 판단하면 안 된다.
     static boolean failedBeforeSending(RestClientException exception) {
         Throwable cause = exception.getCause();
         return cause instanceof ConnectException || cause instanceof HttpConnectTimeoutException;
@@ -279,7 +274,6 @@ public class TestPgPaymentGateway implements PaymentGateway {
         return new PaymentTransactionsLookup.Failed(reason);
     }
 
-    // 예외 메시지는 요청 URL 등을 담을 수 있어 원인 타입 이름만 요약한다.
     private static String causeSummary(RestClientException exception) {
         Throwable cause = exception.getCause();
         return exception.getClass().getSimpleName() + (cause == null ? "" : "(" + cause.getClass().getSimpleName() + ")");

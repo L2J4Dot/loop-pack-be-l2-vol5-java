@@ -2,7 +2,6 @@ package com.loopers.application.payment.port;
 
 import com.loopers.domain.common.Money;
 
-// PG에 결제 생성을 요청하는 입력. providerOrderId는 PG에 보내는 주문 식별 문자열이다.
 // 카드 번호는 toString·예외 메시지에 남기지 않는다(설계 21절).
 public record PaymentCreateCommand(String providerOrderId, String cardType, String cardNo, Money amount) {
     private static final int MIN_ORDER_ID_LENGTH = 6;

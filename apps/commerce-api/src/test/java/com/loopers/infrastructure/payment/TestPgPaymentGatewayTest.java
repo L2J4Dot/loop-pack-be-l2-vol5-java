@@ -47,7 +47,6 @@ class TestPgPaymentGatewayTest {
     private static final String ORDER_ID = "LP-ORD-0000000042";
     private static final String CARD_NO = "1234-5678-9814-1451";
     private static final long AMOUNT = 5_000;
-    // read timeout보다 충분히 긴 고정 지연. 테스트 PG가 거래를 만든 뒤 이만큼 늦게 응답한다.
     private static final Duration SERVER_DELAY = Duration.ofMillis(1_500);
     private static final Duration READ_TIMEOUT = Duration.ofMillis(400);
 

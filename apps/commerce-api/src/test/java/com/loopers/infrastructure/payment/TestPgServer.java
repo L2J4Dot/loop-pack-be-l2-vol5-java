@@ -23,8 +23,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-// 과제 테스트 PG 계약(설계 21절)을 흉내 내는 테스트용 서버. 테스트마다 생성·조회 동작을 지정하고, 받은 요청을 기록한다.
-// 지연은 고정값이며 close()에서 서버와 처리 스레드를 정리한다.
 final class TestPgServer implements AutoCloseable {
     static final String PAYMENTS_PATH = "/api/v1/payments";
     static final String REJECT_CODE = "TEST_PG_REJECTED_BEFORE_CREATE";
