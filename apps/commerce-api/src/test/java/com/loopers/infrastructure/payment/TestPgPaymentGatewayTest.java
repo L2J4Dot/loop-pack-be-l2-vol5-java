@@ -25,7 +25,9 @@ import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,6 +36,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.client.ResourceAccessException;
@@ -125,56 +128,90 @@ class TestPgPaymentGatewayTest {
     @Nested
     @DisplayName("생성 결과 분류")
     class CreateClassification {
-        static Stream<Arguments> cases() {
-            return Stream.of(
-                arguments("202 PENDING → 접수됨", CreateBehavior.ACCEPT_PENDING, PaymentCreateResult.Accepted.class),
-                arguments("202 SUCCESS → 접수됨", CreateBehavior.ACCEPT_SUCCESS, PaymentCreateResult.Accepted.class),
-                arguments("202 FAILED → 접수됨", CreateBehavior.ACCEPT_FAILED, PaymentCreateResult.Accepted.class),
-                arguments("422 계약 거절 → 효과 없는 거절", CreateBehavior.REJECT_BEFORE_CREATE,
-                    PaymentCreateResult.RejectedNoEffect.class),
-                arguments("200 정상 본문 → 결과 모름", CreateBehavior.ACCEPT_WITH_200, PaymentCreateResult.Unknown.class),
-                arguments("202 빈 transactionKey → 결과 모름", CreateBehavior.ACCEPT_BLANK_TRANSACTION_KEY,
-                    PaymentCreateResult.Unknown.class),
-                arguments("202 알 수 없는 status → 결과 모름", CreateBehavior.ACCEPT_UNKNOWN_STATUS,
-                    PaymentCreateResult.Unknown.class),
-                arguments("202 금액 불일치 → 결과 모름", CreateBehavior.ACCEPT_AMOUNT_MISMATCH, PaymentCreateResult.Unknown.class),
-                arguments("202 orderId 불일치 → 결과 모름", CreateBehavior.ACCEPT_ORDER_ID_MISMATCH,
-                    PaymentCreateResult.Unknown.class),
-                arguments("202 amount가 문자열 → 결과 모름", CreateBehavior.ACCEPT_AMOUNT_AS_STRING,
-                    PaymentCreateResult.Unknown.class),
-                arguments("202 깨진 JSON → 결과 모름", CreateBehavior.ACCEPT_BROKEN_JSON, PaymentCreateResult.Unknown.class),
-                arguments("본문 없는 422 → 결과 모름", CreateBehavior.REJECT_WITHOUT_BODY, PaymentCreateResult.Unknown.class),
-                arguments("422 transactionCreated=true → 결과 모름", CreateBehavior.REJECT_TRANSACTION_CREATED,
-                    PaymentCreateResult.Unknown.class),
-                arguments("422 다른 code → 결과 모름", CreateBehavior.REJECT_OTHER_CODE, PaymentCreateResult.Unknown.class),
-                arguments("422 금액 불일치 → 결과 모름", CreateBehavior.REJECT_AMOUNT_MISMATCH, PaymentCreateResult.Unknown.class),
-                arguments("400 → 결과 모름", CreateBehavior.ERROR_400, PaymentCreateResult.Unknown.class),
-                arguments("500 거래 생성 후 → 결과 모름", CreateBehavior.ERROR_500_AFTER_CREATE, PaymentCreateResult.Unknown.class),
-                arguments("500 거래 생성 없이 → 결과 모름", CreateBehavior.ERROR_500_WITHOUT_CREATE,
-                    PaymentCreateResult.Unknown.class),
-                arguments("500 + 거절 본문 → 결과 모름", CreateBehavior.ERROR_500_WITH_REJECT_BODY,
-                    PaymentCreateResult.Unknown.class),
-                arguments("500 + 요청 본문 반사 → 결과 모름", CreateBehavior.ERROR_500_ECHO_REQUEST,
-                    PaymentCreateResult.Unknown.class),
-                arguments("read timeout(거래는 생성됨) → 결과 모름", CreateBehavior.DELAY_AFTER_CREATE,
-                    PaymentCreateResult.Unknown.class),
-                arguments("연결 후 끊김(거래는 생성됨) → 결과 모름", CreateBehavior.DROP_CONNECTION_AFTER_CREATE,
-                    PaymentCreateResult.Unknown.class)
-            );
+        private static final Set<CreateBehavior> ACCEPTED_SCENES = EnumSet.of(
+            CreateBehavior.ACCEPT_PENDING,
+            CreateBehavior.ACCEPT_SUCCESS,
+            CreateBehavior.ACCEPT_FAILED);
+        private static final Set<CreateBehavior> REJECTED_NO_EFFECT_SCENES = EnumSet.of(
+            CreateBehavior.REJECT_BEFORE_CREATE);
+        private static final Set<CreateBehavior> UNKNOWN_SCENES = EnumSet.of(
+            CreateBehavior.ACCEPT_WITH_200,
+            CreateBehavior.ACCEPT_BLANK_TRANSACTION_KEY,
+            CreateBehavior.ACCEPT_UNKNOWN_STATUS,
+            CreateBehavior.ACCEPT_AMOUNT_MISMATCH,
+            CreateBehavior.ACCEPT_ORDER_ID_MISMATCH,
+            CreateBehavior.ACCEPT_AMOUNT_AS_STRING,
+            CreateBehavior.ACCEPT_BROKEN_JSON,
+            CreateBehavior.REJECT_WITHOUT_BODY,
+            CreateBehavior.REJECT_TRANSACTION_CREATED,
+            CreateBehavior.REJECT_OTHER_CODE,
+            CreateBehavior.REJECT_AMOUNT_MISMATCH,
+            CreateBehavior.ERROR_400,
+            CreateBehavior.ERROR_500_AFTER_CREATE,
+            CreateBehavior.ERROR_500_WITHOUT_CREATE,
+            CreateBehavior.ERROR_500_WITH_REJECT_BODY,
+            CreateBehavior.ERROR_500_ECHO_REQUEST,
+            CreateBehavior.DELAY_AFTER_CREATE,
+            CreateBehavior.DROP_CONNECTION_AFTER_CREATE);
+
+        static Stream<CreateBehavior> acceptedScenes() {
+            return ACCEPTED_SCENES.stream();
+        }
+
+        static Stream<CreateBehavior> rejectedNoEffectScenes() {
+            return REJECTED_NO_EFFECT_SCENES.stream();
+        }
+
+        static Stream<CreateBehavior> unknownScenes() {
+            return UNKNOWN_SCENES.stream();
         }
 
         @ParameterizedTest(name = "{0}")
-        @MethodSource("cases")
-        @DisplayName("PG 응답에 따라 생성 결과를 분류하고 create를 정확히 한 번만 보내며 카드 번호를 남기지 않는다")
-        void classifiesCreateResult(String name, CreateBehavior behavior, Class<? extends PaymentCreateResult> expected) {
+        @MethodSource("acceptedScenes")
+        @DisplayName("202 응답이 접수 계약을 모두 만족하면 접수됨으로 분류한다")
+        void classifiesAccepted(CreateBehavior behavior) {
             server.createBehavior(behavior);
 
-            PaymentCreateResult result = gateway.create(command());
+            assertThat(gateway.create(command())).isInstanceOf(PaymentCreateResult.Accepted.class);
+        }
 
-            assertThat(result).isInstanceOf(expected);
-            assertThat(server.createCalls()).isEqualTo(1);
-            assertThat(result.toString()).doesNotContain(CARD_NO);
-            assertThat(loggedText()).doesNotContain(CARD_NO);
+        @ParameterizedTest(name = "{0}")
+        @MethodSource("rejectedNoEffectScenes")
+        @DisplayName("422 응답이 거래 미생성 거절 계약을 모두 만족하면 효과 없는 거절로 분류한다")
+        void classifiesRejectedNoEffect(CreateBehavior behavior) {
+            server.createBehavior(behavior);
+
+            assertThat(gateway.create(command())).isInstanceOf(PaymentCreateResult.RejectedNoEffect.class);
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @MethodSource("unknownScenes")
+        @DisplayName("접수·거절 계약을 벗어나거나 응답을 끝까지 받지 못하면 결과 모름으로 분류한다")
+        void classifiesUnknown(CreateBehavior behavior) {
+            server.createBehavior(behavior);
+
+            assertThat(gateway.create(command())).isInstanceOf(PaymentCreateResult.Unknown.class);
+        }
+
+        @Test
+        @DisplayName("닫힌 포트로 연결이 거부되면 미발송으로 분류한다")
+        void connectionRefusedIsNotSent() throws IOException {
+            TestPgPaymentGateway closedPortGateway = gatewayFor(URI.create("http://127.0.0.1:" + closedPort()));
+
+            assertThat(closedPortGateway.create(command())).isInstanceOf(PaymentCreateResult.NotSent.class);
+        }
+
+        @Test
+        @DisplayName("테스트 PG의 모든 생성 장면이 접수됨·효과 없는 거절·결과 모름 중 정확히 한 칸에 속한다")
+        void everySceneBelongsToExactlyOneResult() {
+            Set<CreateBehavior> classified = EnumSet.noneOf(CreateBehavior.class);
+            classified.addAll(ACCEPTED_SCENES);
+            classified.addAll(REJECTED_NO_EFFECT_SCENES);
+            classified.addAll(UNKNOWN_SCENES);
+
+            assertThat(classified).isEqualTo(EnumSet.allOf(CreateBehavior.class));
+            assertThat(ACCEPTED_SCENES.size() + REJECTED_NO_EFFECT_SCENES.size() + UNKNOWN_SCENES.size())
+                .isEqualTo(CreateBehavior.values().length);
         }
 
         @Test
@@ -211,15 +248,41 @@ class TestPgPaymentGatewayTest {
             assertThat(server.transactions()).hasSize(1);
             assertThat(server.createCalls()).isEqualTo(1);
         }
+    }
+
+    @Nested
+    @DisplayName("생성 공통 보장")
+    class CreateGuarantees {
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(CreateBehavior.class)
+        @DisplayName("모든 장면에서 create를 정확히 한 번만 보낸다")
+        void sendsCreateExactlyOnce(CreateBehavior behavior) {
+            server.createBehavior(behavior);
+
+            gateway.create(command());
+
+            assertThat(server.createCalls()).isEqualTo(1);
+        }
+
+        @ParameterizedTest(name = "{0}")
+        @EnumSource(CreateBehavior.class)
+        @DisplayName("모든 장면에서 카드 번호를 결과·로그에 남기지 않는다")
+        void hidesCardNumber(CreateBehavior behavior) {
+            server.createBehavior(behavior);
+
+            PaymentCreateResult result = gateway.create(command());
+
+            assertThat(result.toString()).doesNotContain(CARD_NO);
+            assertThat(loggedText()).doesNotContain(CARD_NO);
+        }
 
         @Test
-        @DisplayName("닫힌 포트로 연결이 거부되면 미발송이다")
-        void connectionRefusedIsNotSent() throws IOException {
+        @DisplayName("연결이 거부되어 미발송이어도 카드 번호를 결과·로그에 남기지 않는다")
+        void hidesCardNumberWhenNotSent() throws IOException {
             TestPgPaymentGateway closedPortGateway = gatewayFor(URI.create("http://127.0.0.1:" + closedPort()));
 
             PaymentCreateResult result = closedPortGateway.create(command());
 
-            assertThat(result).isInstanceOf(PaymentCreateResult.NotSent.class);
             assertThat(result.toString()).doesNotContain(CARD_NO);
             assertThat(loggedText()).doesNotContain(CARD_NO);
         }
