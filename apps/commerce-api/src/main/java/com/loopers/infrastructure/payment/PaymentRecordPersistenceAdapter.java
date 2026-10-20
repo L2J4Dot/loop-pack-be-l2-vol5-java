@@ -44,6 +44,6 @@ public class PaymentRecordPersistenceAdapter implements PaymentRecordRepository 
 
     private PaymentRecord toDomain(PaymentRecordJpaEntity entity) {
         return PaymentRecord.restore(entity.getId(), entity.getOrderId(), PaymentRecord.Method.valueOf(entity.getMethod()),
-            new Money(entity.getAmount()), PaymentRecord.Result.valueOf(entity.getResult()));
+            new Money(entity.getAmount()), PaymentRecord.Result.valueOf(entity.getResult()), null, null, null, null, null);
     }
 }

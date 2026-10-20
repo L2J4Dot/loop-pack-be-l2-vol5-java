@@ -6,7 +6,11 @@ import com.loopers.domain.common.RuleViolationException;
 import java.util.List;
 
 public final class Order {
-    public enum Status { DRAFT, CONFIRMED }
+    public enum Status { DRAFT, PAYMENT_PENDING, CONFIRMED, PAYMENT_FAILED }
+
+    public enum PaymentOutcome { SUCCEEDED, FAILED, UNKNOWN }
+
+    public enum PaymentTransition { CHANGED, UNCHANGED, CONFLICT, ANOMALY }
 
     private final Long id;
     private final long userId;
@@ -45,6 +49,31 @@ public final class Order {
     public void confirm() {
         requireDraft();
         status = Status.CONFIRMED;
+    }
+
+    public void startPayment() {
+        requireDraft();
+        status = Status.PAYMENT_PENDING;
+    }
+
+    // 결제 대기만 결과로 바뀐다. 종결된 주문은 늦게 온 반대 결과로 덮어쓰지 않고 충돌로 알린다(설계 23절 상태 전이 표).
+    public PaymentTransition applyPaymentOutcome(PaymentOutcome outcome) {
+        return switch (status) {
+            case DRAFT -> PaymentTransition.ANOMALY;
+            case PAYMENT_PENDING -> switch (outcome) {
+                case SUCCEEDED -> {
+                    status = Status.CONFIRMED;
+                    yield PaymentTransition.CHANGED;
+                }
+                case FAILED -> {
+                    status = Status.PAYMENT_FAILED;
+                    yield PaymentTransition.CHANGED;
+                }
+                case UNKNOWN -> PaymentTransition.UNCHANGED;
+            };
+            case CONFIRMED -> outcome == PaymentOutcome.FAILED ? PaymentTransition.CONFLICT : PaymentTransition.UNCHANGED;
+            case PAYMENT_FAILED -> outcome == PaymentOutcome.SUCCEEDED ? PaymentTransition.CONFLICT : PaymentTransition.UNCHANGED;
+        };
     }
 
     public Long getId() {
