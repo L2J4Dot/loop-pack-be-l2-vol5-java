@@ -92,6 +92,11 @@ class OrderApiIntegrationTest {
             .content("{\"items\":[{\"productId\":" + first + ",\"quantity\":2},{\"productId\":" + second + ",\"quantity\":1}]}"))
             .andExpect(status().isCreated()).andExpect(jsonPath("$.data.status").value("DRAFT"))
             .andExpect(jsonPath("$.data.total").value(7000)).andReturn();
+        long draftId = mapper.readTree(response.getResponse().getContentAsString()).path("data").path("id").asLong();
+        mvc.perform(get("/api/v1/orders/{id}", draftId).header("X-USER-ID", "1"))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.data.paidAmount").value(0))
+            .andExpect(jsonPath("$.data.paymentResult").value("NOT_PAID"))
+            .andExpect(jsonPath("$.data.paymentMethod").doesNotExist());
         long id = mapper.readTree(response.getResponse().getContentAsString()).path("data").path("id").asLong();
         assertThat(points.balance(1)).isEqualTo(10000);
         assertThat(products.getAdminProduct(first).stock()).isEqualTo(5);
@@ -102,7 +107,12 @@ class OrderApiIntegrationTest {
         assertThat(jdbc.queryForMap("select method, amount, result from payments where order_id = ?", id))
             .containsEntry("method", "POINT").containsEntry("amount", 7000L).containsEntry("result", "SUCCESS");
         mvc.perform(get("/api/v1/orders/{id}", id).header("X-USER-ID", "1"))
-            .andExpect(status().isOk()).andExpect(jsonPath("$.data.status").value("CONFIRMED"));
+            .andExpect(status().isOk()).andExpect(jsonPath("$.data.status").value("CONFIRMED"))
+            .andExpect(jsonPath("$.data.paidAmount").value(7000)).andExpect(jsonPath("$.data.paymentResult").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.paymentMethod").value("POINT"));
+        mvc.perform(get("/api/v1/orders").header("X-USER-ID", "1"))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].id").value(id))
+            .andExpect(jsonPath("$.data[0].paidAmount").value(7000)).andExpect(jsonPath("$.data[0].paymentMethod").value("POINT"));
         mvc.perform(get("/api/v1/points").header("X-USER-ID", "1")).andExpect(jsonPath("$.data.balance").value(3000));
         mvc.perform(get("/api/v1/orders").header("X-USER-ID", "2")).andExpect(jsonPath("$.data").isEmpty());
         mvc.perform(get("/api-admin/v1/orders").param("userId", "1").with(user("admin").roles("ADMIN")))

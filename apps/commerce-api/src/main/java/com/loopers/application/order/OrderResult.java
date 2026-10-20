@@ -5,7 +5,8 @@ import com.loopers.domain.payment.Payment;
 import java.util.List;
 import java.util.Optional;
 
-public record OrderResult(long id, long userId, List<Item> items, long total, String status, long paidAmount, String paymentResult) {
+public record OrderResult(long id, long userId, List<Item> items, long total, String status, long paidAmount, String paymentResult,
+    String paymentMethod) {
     public record Item(long productId, int quantity, long unitPrice) { }
 
     static OrderResult from(Order order, Optional<Payment> payment) {
@@ -13,7 +14,8 @@ public record OrderResult(long id, long userId, List<Item> items, long total, St
             .map(i -> new Item(i.productId().value(), i.quantity().value(), i.unitPrice().value())).toList();
         long paidAmount = payment.map(found -> found.getAmount().value()).orElse(0L);
         String paymentResult = payment.map(found -> found.getResult().name()).orElse("NOT_PAID");
+        String paymentMethod = payment.map(found -> found.getMethod().name()).orElse(null);
         return new OrderResult(order.getId(), order.getUserId(), items, order.getTotal().value(), order.getStatus().name(),
-            paidAmount, paymentResult);
+            paidAmount, paymentResult, paymentMethod);
     }
 }
