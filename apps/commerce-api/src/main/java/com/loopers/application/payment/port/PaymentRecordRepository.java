@@ -11,4 +11,6 @@ public interface PaymentRecordRepository {
     Optional<PaymentRecord> findByOrderId(long orderId);
 
     List<PaymentRecord> findByOrderIds(Collection<Long> orderIds);
+
+    Optional<PaymentRecord> findByAttemptKey(String attemptKey);
 }

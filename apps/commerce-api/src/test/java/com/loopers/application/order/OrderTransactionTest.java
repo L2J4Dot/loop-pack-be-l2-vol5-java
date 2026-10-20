@@ -205,6 +205,11 @@ class OrderTransactionTest {
         public List<PaymentRecord> findByOrderIds(Collection<Long> orderIds) {
             return delegate.findByOrderIds(orderIds);
         }
+
+        @Override
+        public Optional<PaymentRecord> findByAttemptKey(String attemptKey) {
+            return delegate.findByAttemptKey(attemptKey);
+        }
     }
 
     // 실제 어댑터에 위임하다가 무장된 다음 주문 저장에서 앞선 재고·포인트 변경을 DB로 보낸 뒤 실패를 일으키는 테스트 전용 저장소.

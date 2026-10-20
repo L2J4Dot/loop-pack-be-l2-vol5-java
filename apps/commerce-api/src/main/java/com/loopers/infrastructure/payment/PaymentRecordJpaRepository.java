@@ -9,4 +9,6 @@ public interface PaymentRecordJpaRepository extends JpaRepository<PaymentRecordJ
     Optional<PaymentRecordJpaEntity> findByOrderId(long orderId);
 
     List<PaymentRecordJpaEntity> findByOrderIdIn(Collection<Long> orderIds);
+
+    Optional<PaymentRecordJpaEntity> findByAttemptKey(String attemptKey);
 }

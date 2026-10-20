@@ -21,11 +21,15 @@ public class PaymentRecordPersistenceAdapter implements PaymentRecordRepository 
     @Override
     @Transactional
     public PaymentRecord save(PaymentRecord payment) {
-        if (payment.getId() != null) {
-            throw new IllegalStateException("저장된 결제 기록의 변경은 아직 지원하지 않습니다.");
+        PaymentRecordJpaEntity entity;
+        if (payment.getId() == null) {
+            entity = new PaymentRecordJpaEntity(payment.getOrderId(), payment.getMethod().name(), payment.getAmount().value(),
+                payment.getAttemptKey(), payment.getProviderId(), payment.getProviderOrderId());
+        } else {
+            entity = paymentRecordJpaRepository.findById(payment.getId()).orElseThrow();
         }
-        PaymentRecordJpaEntity entity = new PaymentRecordJpaEntity(payment.getOrderId(), payment.getMethod().name(),
-            payment.getAmount().value(), payment.getResult().name());
+        entity.update(payment.getResult().name(), payment.getTransactionKey(),
+            payment.getProviderStatus() == null ? null : payment.getProviderStatus().name());
         return toDomain(paymentRecordJpaRepository.save(entity));
     }
 
@@ -42,8 +46,17 @@ public class PaymentRecordPersistenceAdapter implements PaymentRecordRepository 
         return paymentRecordJpaRepository.findByOrderIdIn(orderIds).stream().map(this::toDomain).toList();
     }
 
+    @Override
+    public Optional<PaymentRecord> findByAttemptKey(String attemptKey) {
+        return paymentRecordJpaRepository.findByAttemptKey(attemptKey).map(this::toDomain);
+    }
+
     private PaymentRecord toDomain(PaymentRecordJpaEntity entity) {
+        PaymentRecord.ProviderStatus providerStatus = entity.getProviderStatus() == null
+            ? null
+            : PaymentRecord.ProviderStatus.valueOf(entity.getProviderStatus());
         return PaymentRecord.restore(entity.getId(), entity.getOrderId(), PaymentRecord.Method.valueOf(entity.getMethod()),
-            new Money(entity.getAmount()), PaymentRecord.Result.valueOf(entity.getResult()), null, null, null, null, null);
+            new Money(entity.getAmount()), PaymentRecord.Result.valueOf(entity.getResult()), entity.getAttemptKey(),
+            entity.getProviderId(), entity.getProviderOrderId(), entity.getTransactionKey(), providerStatus);
     }
 }

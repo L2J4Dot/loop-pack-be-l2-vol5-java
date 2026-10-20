@@ -63,4 +63,42 @@ class PaymentRecordPersistenceIntegrationTest {
         assertThat(jdbcTemplate.queryForObject("select count(*) from payment_records where order_id = 42", Long.class))
             .isEqualTo(1);
     }
+
+    private static final String ATTEMPT_KEY = "6f1c2a7e-0b9d-4c55-9a51-3f0e8b2d7c11";
+
+    @Test
+    @DisplayName("발송 시작 PG 결제 기록을 저장하고 PG 보고를 반영해 다시 저장하면 새 트랜잭션에서 시도 키로 읽은 값이 반영 결과와 같다")
+    void savesAndUpdatesPgPayment() {
+        PaymentRecord started = paymentRecordRepository.save(PaymentRecord.pgStarted(42, new Money(7000), ATTEMPT_KEY, "test-pg"));
+        PaymentRecord reloadedStarted = paymentRecordRepository.findByAttemptKey(ATTEMPT_KEY).orElseThrow();
+        assertThat(reloadedStarted.getProviderStatus()).isEqualTo(PaymentRecord.ProviderStatus.SEND_STARTED);
+        assertThat(reloadedStarted.getProviderOrderId()).isEqualTo("LP-ORD-0000000042");
+        assertThat(reloadedStarted.getProviderId()).isEqualTo("test-pg");
+        assertThat(reloadedStarted.getResult()).isEqualTo(PaymentRecord.Result.PENDING);
+
+        reloadedStarted.applyProviderReport(PaymentRecord.ProviderStatus.SUCCESS, "TR-000001");
+        paymentRecordRepository.save(reloadedStarted);
+
+        PaymentRecord found = paymentRecordRepository.findByOrderId(42).orElseThrow();
+        assertThat(found.getId()).isEqualTo(started.getId());
+        assertThat(found.getMethod()).isEqualTo(PaymentRecord.Method.PG);
+        assertThat(found.getAttemptKey()).isEqualTo(ATTEMPT_KEY);
+        assertThat(found.getTransactionKey()).isEqualTo("TR-000001");
+        assertThat(found.getProviderStatus()).isEqualTo(PaymentRecord.ProviderStatus.SUCCESS);
+        assertThat(found.getResult()).isEqualTo(PaymentRecord.Result.SUCCESS);
+        assertThat(found.getAmount()).isEqualTo(new Money(7000));
+        assertThat(paymentRecordRepository.findByAttemptKey("other-key")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("다른 주문에 같은 시도 키로 결제 기록을 저장하면 유일 제약으로 거절하고 포인트 기록은 시도 키 없이 여러 건 저장된다")
+    void rejectsSameAttemptKeyForAnotherOrder() {
+        paymentRecordRepository.save(PaymentRecord.pgStarted(42, new Money(7000), ATTEMPT_KEY, "test-pg"));
+        paymentRecordRepository.save(PaymentRecord.point(1, new Money(1000)));
+        paymentRecordRepository.save(PaymentRecord.point(2, new Money(1000)));
+
+        assertThatThrownBy(() -> paymentRecordRepository.save(PaymentRecord.pgStarted(43, new Money(7000), ATTEMPT_KEY, "test-pg")))
+            .isInstanceOf(DataIntegrityViolationException.class);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from payment_records", Long.class)).isEqualTo(3);
+    }
 }
