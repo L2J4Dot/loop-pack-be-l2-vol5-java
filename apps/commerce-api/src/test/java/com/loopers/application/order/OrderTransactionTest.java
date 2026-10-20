@@ -2,14 +2,18 @@ package com.loopers.application.order;
 
 import com.loopers.application.brand.BrandApplicationService;
 import com.loopers.application.order.port.OrderRepository;
+import com.loopers.application.payment.port.PaymentRepository;
 import com.loopers.application.point.PointApplicationService;
 import com.loopers.application.product.ProductApplicationService;
 import com.loopers.domain.order.Order;
+import com.loopers.domain.payment.Payment;
 import com.loopers.infrastructure.order.OrderPersistenceAdapter;
+import com.loopers.infrastructure.payment.PaymentPersistenceAdapter;
 import com.loopers.infrastructure.user.UserJpaEntity;
 import com.loopers.infrastructure.user.UserJpaRepository;
 import com.loopers.utils.DatabaseCleanUp;
 import jakarta.persistence.EntityManager;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,6 +52,9 @@ class OrderTransactionTest {
     private FailingOrderRepository failingOrderRepository;
 
     @Autowired
+    private FailingPaymentRepository failingPaymentRepository;
+
+    @Autowired
     private UserJpaRepository userJpaRepository;
 
     @Autowired
@@ -72,6 +79,7 @@ class OrderTransactionTest {
     @AfterEach
     void clean() {
         failingOrderRepository.disarm();
+        failingPaymentRepository.disarm();
         jdbcTemplate.update("delete from order_items");
         databaseCleanUp.truncateAllTables();
     }
@@ -104,6 +112,29 @@ class OrderTransactionTest {
         assertThat(pointApplicationService.balance(1)).isEqualTo(3000);
     }
 
+    @Test
+    @DisplayName("재고·포인트 차감과 CONFIRMED 주문이 DB에 반영된 뒤 결제 기록 저장에서 실패하면 주문은 DRAFT, 재고·잔액은 확정 전과 같고 결제 기록은 없다")
+    void rollsBackOrderStockAndPointWhenPaymentSaveFails() {
+        OrderResult draft = orderApplicationService.create(1, List.of(
+            new OrderApplicationService.ItemRequest(firstProductId, 2),
+            new OrderApplicationService.ItemRequest(secondProductId, 1)));
+        failingPaymentRepository.failOnNextSave();
+
+        assertThatThrownBy(() -> orderApplicationService.confirm(1, draft.id()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessage(FailingPaymentRepository.INJECTED_FAILURE);
+
+        assertThat(failingPaymentRepository.sawAppliedChangesBeforeFailure()).isTrue();
+        OrderResult afterFailure = orderApplicationService.getMyOrder(1, draft.id());
+        assertThat(afterFailure.status()).isEqualTo("DRAFT");
+        assertThat(afterFailure.paidAmount()).isZero();
+        assertThat(afterFailure.paymentResult()).isEqualTo("NOT_PAID");
+        assertThat(jdbcTemplate.queryForObject("select count(*) from payments", Long.class)).isZero();
+        assertThat(productApplicationService.getAdminProduct(firstProductId).stock()).isEqualTo(5);
+        assertThat(productApplicationService.getAdminProduct(secondProductId).stock()).isEqualTo(5);
+        assertThat(pointApplicationService.balance(1)).isEqualTo(10000);
+    }
+
     @TestConfiguration
     static class FailureInjectionConfig {
         @Bean
@@ -111,6 +142,68 @@ class OrderTransactionTest {
         FailingOrderRepository failingOrderRepository(OrderPersistenceAdapter orderPersistenceAdapter,
             EntityManager entityManager, JdbcTemplate jdbcTemplate) {
             return new FailingOrderRepository(orderPersistenceAdapter, entityManager, jdbcTemplate);
+        }
+
+        @Bean
+        @Primary
+        FailingPaymentRepository failingPaymentRepository(PaymentPersistenceAdapter paymentPersistenceAdapter,
+            EntityManager entityManager, JdbcTemplate jdbcTemplate) {
+            return new FailingPaymentRepository(paymentPersistenceAdapter, entityManager, jdbcTemplate);
+        }
+    }
+
+    // 무장된 다음 결제 기록 저장에서 앞선 재고·포인트 차감과 주문 확정을 DB로 보낸 뒤 실패를 일으키는 테스트 전용 저장소.
+    static class FailingPaymentRepository implements PaymentRepository {
+        static final String INJECTED_FAILURE = "주입된 결제 기록 저장 실패";
+
+        private final PaymentRepository delegate;
+        private final EntityManager entityManager;
+        private final JdbcTemplate jdbcTemplate;
+        private final AtomicInteger remainingFailures = new AtomicInteger();
+        private final AtomicBoolean sawAppliedChanges = new AtomicBoolean();
+
+        FailingPaymentRepository(PaymentRepository delegate, EntityManager entityManager, JdbcTemplate jdbcTemplate) {
+            this.delegate = delegate;
+            this.entityManager = entityManager;
+            this.jdbcTemplate = jdbcTemplate;
+        }
+
+        void failOnNextSave() {
+            sawAppliedChanges.set(false);
+            remainingFailures.set(1);
+        }
+
+        void disarm() {
+            remainingFailures.set(0);
+        }
+
+        boolean sawAppliedChangesBeforeFailure() {
+            return sawAppliedChanges.get();
+        }
+
+        @Override
+        public Payment save(Payment payment) {
+            if (remainingFailures.getAndUpdate(count -> Math.max(0, count - 1)) > 0) {
+                entityManager.flush();
+                Integer totalStock = jdbcTemplate.queryForObject("select sum(stock) from products", Integer.class);
+                Long balance = jdbcTemplate.queryForObject("select balance from points where user_id = 1", Long.class);
+                String status = jdbcTemplate.queryForObject("select status from orders where id = ?", String.class,
+                    payment.getOrderId());
+                sawAppliedChanges.set(totalStock != null && totalStock == 7 && balance != null && balance == 3000L
+                    && "CONFIRMED".equals(status));
+                throw new IllegalStateException(INJECTED_FAILURE);
+            }
+            return delegate.save(payment);
+        }
+
+        @Override
+        public Optional<Payment> findByOrderId(long orderId) {
+            return delegate.findByOrderId(orderId);
+        }
+
+        @Override
+        public List<Payment> findByOrderIds(Collection<Long> orderIds) {
+            return delegate.findByOrderIds(orderIds);
         }
     }
 

@@ -13,10 +13,8 @@ public final class Order {
     private final List<OrderItem> items;
     private final Money total;
     private Status status;
-    private Money paidAmount;
-    private String paymentResult;
 
-    private Order(Long id, long userId, List<OrderItem> items, Status status, Money paidAmount, String paymentResult) {
+    private Order(Long id, long userId, List<OrderItem> items, Status status) {
         if (items == null || items.isEmpty() || items.size() > 100) {
             throw new InvalidValueException("주문 품목은 1~100개여야 합니다.");
         }
@@ -28,16 +26,14 @@ public final class Order {
         this.items = List.copyOf(items);
         this.total = items.stream().map(OrderItem::subtotal).reduce(new Money(0), Money::add);
         this.status = status;
-        this.paidAmount = paidAmount;
-        this.paymentResult = paymentResult;
     }
 
     public static Order create(long userId, List<OrderItem> items) {
-        return new Order(null, userId, items, Status.DRAFT, new Money(0), "NOT_PAID");
+        return new Order(null, userId, items, Status.DRAFT);
     }
 
-    public static Order restore(long id, long userId, List<OrderItem> items, Status status, Money paidAmount, String result) {
-        return new Order(id, userId, items, status, paidAmount, result);
+    public static Order restore(long id, long userId, List<OrderItem> items, Status status) {
+        return new Order(id, userId, items, status);
     }
 
     public void requireDraft() {
@@ -49,8 +45,6 @@ public final class Order {
     public void confirm() {
         requireDraft();
         status = Status.CONFIRMED;
-        paidAmount = total;
-        paymentResult = "SUCCESS";
     }
 
     public Long getId() {
@@ -71,13 +65,5 @@ public final class Order {
 
     public Status getStatus() {
         return status;
-    }
-
-    public Money getPaidAmount() {
-        return paidAmount;
-    }
-
-    public String getPaymentResult() {
-        return paymentResult;
     }
 }

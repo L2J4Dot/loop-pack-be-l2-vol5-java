@@ -1,6 +1,7 @@
 package com.loopers.application.order;
 
 import com.loopers.application.order.port.OrderRepository;
+import com.loopers.application.payment.port.PaymentRepository;
 import com.loopers.application.point.port.PointRepository;
 import com.loopers.application.product.ProductNotFoundException;
 import com.loopers.application.product.port.ProductRepository;
@@ -8,11 +9,16 @@ import com.loopers.domain.common.InvalidValueException;
 import com.loopers.domain.order.Order;
 import com.loopers.domain.order.OrderItem;
 import com.loopers.domain.order.Quantity;
+import com.loopers.domain.payment.Payment;
 import com.loopers.domain.point.Point;
 import com.loopers.domain.product.Product;
 import com.loopers.domain.product.ProductId;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,12 +28,14 @@ public class OrderApplicationService {
     private final OrderRepository orderRepository;
     private final ProductRepository productRepository;
     private final PointRepository pointRepository;
+    private final PaymentRepository paymentRepository;
 
     public OrderApplicationService(OrderRepository orderRepository, ProductRepository productRepository,
-        PointRepository pointRepository) {
+        PointRepository pointRepository, PaymentRepository paymentRepository) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
         this.pointRepository = pointRepository;
+        this.paymentRepository = paymentRepository;
     }
 
     public record ItemRequest(long productId, int quantity) { }
@@ -46,7 +54,7 @@ public class OrderApplicationService {
                 return new OrderItem(product.getId(), new Quantity(request.quantity()), product.getPrice());
             })
             .toList();
-        return OrderResult.from(orderRepository.save(Order.create(userId, items)));
+        return OrderResult.from(orderRepository.save(Order.create(userId, items)), Optional.empty());
     }
 
     public OrderResult confirm(long userId, long orderId) {
@@ -69,7 +77,9 @@ public class OrderApplicationService {
         point.pay(order.getTotal());
         pointRepository.save(point);
         order.confirm();
-        return OrderResult.from(orderRepository.save(order));
+        Order confirmed = orderRepository.save(order);
+        Payment payment = paymentRepository.save(Payment.point(confirmed.getId(), confirmed.getTotal()));
+        return OrderResult.from(confirmed, Optional.of(payment));
     }
 
     @Transactional(readOnly = true)
@@ -77,21 +87,34 @@ public class OrderApplicationService {
         Order order = orderRepository.findById(orderId)
             .filter(found -> found.getUserId() == userId)
             .orElseThrow(OrderNotFoundException::new);
-        return OrderResult.from(order);
+        return withPayment(order);
     }
 
     @Transactional(readOnly = true)
     public OrderResult getAdminOrder(long orderId) {
-        return OrderResult.from(orderRepository.findById(orderId).orElseThrow(OrderNotFoundException::new));
+        return withPayment(orderRepository.findById(orderId).orElseThrow(OrderNotFoundException::new));
     }
 
     @Transactional(readOnly = true)
     public List<OrderResult> listMyOrders(long userId, int page, int size) {
-        return orderRepository.findPage(userId, page, size).stream().map(OrderResult::from).toList();
+        return withPayments(orderRepository.findPage(userId, page, size));
     }
 
     @Transactional(readOnly = true)
     public List<OrderResult> listAdminOrders(Long userId, int page, int size) {
-        return orderRepository.findPage(userId, page, size).stream().map(OrderResult::from).toList();
+        return withPayments(orderRepository.findPage(userId, page, size));
+    }
+
+    private OrderResult withPayment(Order order) {
+        return OrderResult.from(order, paymentRepository.findByOrderId(order.getId()));
+    }
+
+    private List<OrderResult> withPayments(List<Order> orders) {
+        Map<Long, Payment> paymentsByOrderId = paymentRepository.findByOrderIds(orders.stream().map(Order::getId).toList())
+            .stream()
+            .collect(Collectors.toMap(Payment::getOrderId, Function.identity()));
+        return orders.stream()
+            .map(order -> OrderResult.from(order, Optional.ofNullable(paymentsByOrderId.get(order.getId()))))
+            .toList();
     }
 }
