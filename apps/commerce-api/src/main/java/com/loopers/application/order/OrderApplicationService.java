@@ -1,7 +1,7 @@
 package com.loopers.application.order;
 
 import com.loopers.application.order.port.OrderRepository;
-import com.loopers.application.payment.port.PaymentRepository;
+import com.loopers.application.payment.port.PaymentRecordRepository;
 import com.loopers.application.point.port.PointRepository;
 import com.loopers.application.product.ProductNotFoundException;
 import com.loopers.application.product.port.ProductRepository;
@@ -9,7 +9,7 @@ import com.loopers.domain.common.InvalidValueException;
 import com.loopers.domain.order.Order;
 import com.loopers.domain.order.OrderItem;
 import com.loopers.domain.order.Quantity;
-import com.loopers.domain.payment.Payment;
+import com.loopers.domain.payment.PaymentRecord;
 import com.loopers.domain.point.Point;
 import com.loopers.domain.product.Product;
 import com.loopers.domain.product.ProductId;
@@ -28,14 +28,14 @@ public class OrderApplicationService {
     private final OrderRepository orderRepository;
     private final ProductRepository productRepository;
     private final PointRepository pointRepository;
-    private final PaymentRepository paymentRepository;
+    private final PaymentRecordRepository paymentRecordRepository;
 
     public OrderApplicationService(OrderRepository orderRepository, ProductRepository productRepository,
-        PointRepository pointRepository, PaymentRepository paymentRepository) {
+        PointRepository pointRepository, PaymentRecordRepository paymentRecordRepository) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
         this.pointRepository = pointRepository;
-        this.paymentRepository = paymentRepository;
+        this.paymentRecordRepository = paymentRecordRepository;
     }
 
     public record ItemRequest(long productId, int quantity) { }
@@ -78,7 +78,7 @@ public class OrderApplicationService {
         pointRepository.save(point);
         order.confirm();
         Order confirmed = orderRepository.save(order);
-        Payment payment = paymentRepository.save(Payment.point(confirmed.getId(), confirmed.getTotal()));
+        PaymentRecord payment = paymentRecordRepository.save(PaymentRecord.point(confirmed.getId(), confirmed.getTotal()));
         return OrderResult.from(confirmed, Optional.of(payment));
     }
 
@@ -106,13 +106,13 @@ public class OrderApplicationService {
     }
 
     private OrderResult withPayment(Order order) {
-        return OrderResult.from(order, paymentRepository.findByOrderId(order.getId()));
+        return OrderResult.from(order, paymentRecordRepository.findByOrderId(order.getId()));
     }
 
     private List<OrderResult> withPayments(List<Order> orders) {
-        Map<Long, Payment> paymentsByOrderId = paymentRepository.findByOrderIds(orders.stream().map(Order::getId).toList())
-            .stream()
-            .collect(Collectors.toMap(Payment::getOrderId, Function.identity()));
+        List<Long> orderIds = orders.stream().map(Order::getId).toList();
+        Map<Long, PaymentRecord> paymentsByOrderId = paymentRecordRepository.findByOrderIds(orderIds).stream()
+            .collect(Collectors.toMap(PaymentRecord::getOrderId, Function.identity()));
         return orders.stream()
             .map(order -> OrderResult.from(order, Optional.ofNullable(paymentsByOrderId.get(order.getId()))))
             .toList();

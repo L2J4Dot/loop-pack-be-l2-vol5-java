@@ -104,7 +104,7 @@ class OrderApiIntegrationTest {
         mvc.perform(post("/api/v1/orders/{id}/confirm", id).header("X-USER-ID", "1"))
             .andExpect(status().isOk()).andExpect(jsonPath("$.data.paidAmount").value(7000))
             .andExpect(jsonPath("$.data.paymentResult").value("SUCCESS"));
-        assertThat(jdbc.queryForMap("select method, amount, result from payments where order_id = ?", id))
+        assertThat(jdbc.queryForMap("select method, amount, result from payment_records where order_id = ?", id))
             .containsEntry("method", "POINT").containsEntry("amount", 7000L).containsEntry("result", "SUCCESS");
         mvc.perform(get("/api/v1/orders/{id}", id).header("X-USER-ID", "1"))
             .andExpect(status().isOk()).andExpect(jsonPath("$.data.status").value("CONFIRMED"))
@@ -134,7 +134,7 @@ class OrderApiIntegrationTest {
         assertThat(products.getAdminProduct(second).stock()).isEqualTo(5);
         assertThat(points.balance(1)).isEqualTo(100);
         assertThat(orders.getMyOrder(1, order.id()).status()).isEqualTo("DRAFT");
-        assertThat(jdbc.queryForObject("select count(*) from payments", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from payment_records", Long.class)).isZero();
     }
 
     @Test

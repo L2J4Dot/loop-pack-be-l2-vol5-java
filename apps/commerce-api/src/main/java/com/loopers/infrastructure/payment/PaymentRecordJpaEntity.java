@@ -10,8 +10,9 @@ import jakarta.persistence.UniqueConstraint;
 
 // 주문당 결제 기록은 하나다. 이관 스크립트의 재실행과 confirm 경쟁을 DB 유일 제약으로도 막는다(설계 22절).
 @Entity
-@Table(name = "payments", uniqueConstraints = @UniqueConstraint(name = "uk_payments_order_id", columnNames = "order_id"))
-public class PaymentJpaEntity {
+@Table(name = "payment_records",
+    uniqueConstraints = @UniqueConstraint(name = "uk_payment_records_order_id", columnNames = "order_id"))
+public class PaymentRecordJpaEntity {
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     @Column(nullable = false, updatable = false)
@@ -23,9 +24,9 @@ public class PaymentJpaEntity {
     @Column(nullable = false, length = 20)
     private String result;
 
-    protected PaymentJpaEntity() { }
+    protected PaymentRecordJpaEntity() { }
 
-    PaymentJpaEntity(long orderId, String method, long amount, String result) {
+    PaymentRecordJpaEntity(long orderId, String method, long amount, String result) {
         this.orderId = orderId;
         this.method = method;
         this.amount = amount;

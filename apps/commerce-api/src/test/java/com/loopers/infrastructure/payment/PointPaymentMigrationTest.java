@@ -35,7 +35,7 @@ class PointPaymentMigrationTest {
         legacyOrder(3, 2000, "DRAFT", 0, "NOT_PAID");
         // 2a 배포 후 확정된 주문: 원본 열은 기본값이고 결제 기록이 이미 있다.
         legacyOrder(4, 5000, "CONFIRMED", 0, "NOT_PAID");
-        jdbcTemplate.update("insert into payments(order_id, method, amount, result) values (4, 'POINT', 5000, 'SUCCESS')");
+        jdbcTemplate.update("insert into payment_records(order_id, method, amount, result) values (4, 'POINT', 5000, 'SUCCESS')");
     }
 
     @AfterEach
@@ -54,13 +54,13 @@ class PointPaymentMigrationTest {
             Map.entry(2L, "POINT/3000/SUCCESS"),
             Map.entry(4L, "POINT/5000/SUCCESS"));
         assertThat(count("select count(*) from orders where status = 'CONFIRMED'"))
-            .isEqualTo(count("select count(*) from orders o join payments p on p.order_id = o.id where o.status = 'CONFIRMED'"));
-        assertThat(count("select count(*) from payments p join orders o on o.id = p.order_id where o.status = 'DRAFT'")).isZero();
+            .isEqualTo(count("select count(*) from orders o join payment_records p on p.order_id = o.id where o.status = 'CONFIRMED'"));
+        assertThat(count("select count(*) from payment_records p join orders o on o.id = p.order_id where o.status = 'DRAFT'")).isZero();
         assertThat(count("select sum(paid_amount) from orders where status = 'CONFIRMED' and payment_result = 'SUCCESS'"))
-            .isEqualTo(count("select sum(p.amount) from payments p join orders o on o.id = p.order_id"
+            .isEqualTo(count("select sum(p.amount) from payment_records p join orders o on o.id = p.order_id"
                 + " where o.status = 'CONFIRMED' and o.payment_result = 'SUCCESS'"))
             .isEqualTo(10000);
-        assertThat(count("select count(*) from orders o join payments p on p.order_id = o.id"
+        assertThat(count("select count(*) from orders o join payment_records p on p.order_id = o.id"
             + " where o.payment_result = 'SUCCESS' and p.amount <> o.paid_amount")).isZero();
     }
 
@@ -104,7 +104,7 @@ class PointPaymentMigrationTest {
 
     private Map<Long, String> paymentsByOrderId() {
         Map<Long, String> byOrderId = new LinkedHashMap<>();
-        jdbcTemplate.query("select order_id, method, amount, result from payments order by order_id",
+        jdbcTemplate.query("select order_id, method, amount, result from payment_records order by order_id",
             resultSet -> {
                 byOrderId.put(resultSet.getLong("order_id"),
                     resultSet.getString("method") + "/" + resultSet.getLong("amount") + "/" + resultSet.getString("result"));
