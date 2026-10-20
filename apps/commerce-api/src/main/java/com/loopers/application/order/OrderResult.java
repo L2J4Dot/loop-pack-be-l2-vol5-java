@@ -12,7 +12,9 @@ public record OrderResult(long id, long userId, List<Item> items, long total, St
     static OrderResult from(Order order, Optional<PaymentRecord> payment) {
         List<Item> items = order.getItems().stream()
             .map(i -> new Item(i.productId().value(), i.quantity().value(), i.unitPrice().value())).toList();
-        long paidAmount = payment.map(found -> found.getAmount().value()).orElse(0L);
+        long paidAmount = payment.filter(found -> found.getResult() == PaymentRecord.Result.SUCCESS)
+            .map(found -> found.getAmount().value())
+            .orElse(0L);
         String paymentResult = payment.map(found -> found.getResult().name()).orElse("NOT_PAID");
         String paymentMethod = payment.map(found -> found.getMethod().name()).orElse(null);
         return new OrderResult(order.getId(), order.getUserId(), items, order.getTotal().value(), order.getStatus().name(),

@@ -23,11 +23,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-final class TestPgServer implements AutoCloseable {
+public final class TestPgServer implements AutoCloseable {
     static final String PAYMENTS_PATH = "/api/v1/payments";
     static final String REJECT_CODE = "TEST_PG_REJECTED_BEFORE_CREATE";
 
-    enum CreateBehavior {
+    public enum CreateBehavior {
         ACCEPT_PENDING,
         ACCEPT_SUCCESS,
         ACCEPT_FAILED,
@@ -52,7 +52,7 @@ final class TestPgServer implements AutoCloseable {
         DROP_CONNECTION_AFTER_CREATE
     }
 
-    enum LookupBehavior {
+    public enum LookupBehavior {
         NORMAL,
         ERROR_500,
         DELAY,
@@ -70,7 +70,7 @@ final class TestPgServer implements AutoCloseable {
         }
     }
 
-    record StoredTransaction(String transactionKey, String orderId, long amount, String status) {
+    public record StoredTransaction(String transactionKey, String orderId, long amount, String status) {
     }
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -84,7 +84,7 @@ final class TestPgServer implements AutoCloseable {
     private volatile CreateBehavior createBehavior = CreateBehavior.ACCEPT_PENDING;
     private volatile LookupBehavior lookupBehavior = LookupBehavior.NORMAL;
 
-    TestPgServer(String expectedUserId, Duration delay) throws IOException {
+    public TestPgServer(String expectedUserId, Duration delay) throws IOException {
         this.expectedUserId = expectedUserId;
         this.delay = delay;
         this.server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
@@ -93,23 +93,23 @@ final class TestPgServer implements AutoCloseable {
         this.server.start();
     }
 
-    URI baseUrl() {
+    public URI baseUrl() {
         return URI.create("http://127.0.0.1:" + server.getAddress().getPort());
     }
 
-    void createBehavior(CreateBehavior behavior) {
+    public void createBehavior(CreateBehavior behavior) {
         this.createBehavior = behavior;
     }
 
-    void lookupBehavior(LookupBehavior behavior) {
+    public void lookupBehavior(LookupBehavior behavior) {
         this.lookupBehavior = behavior;
     }
 
-    String addTransaction(String orderId, long amount, String status) {
+    public String addTransaction(String orderId, long amount, String status) {
         return store(orderId, amount, status).transactionKey();
     }
 
-    List<StoredTransaction> transactions() {
+    public List<StoredTransaction> transactions() {
         return List.copyOf(transactions.values());
     }
 
@@ -117,11 +117,11 @@ final class TestPgServer implements AutoCloseable {
         return List.copyOf(requests);
     }
 
-    long createCalls() {
+    public long createCalls() {
         return requests.stream().filter(request -> request.method().equals("POST")).count();
     }
 
-    long lookupCalls() {
+    public long lookupCalls() {
         return requests.stream().filter(request -> request.method().equals("GET")).count();
     }
 

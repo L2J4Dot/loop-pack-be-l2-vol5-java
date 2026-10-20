@@ -46,11 +46,6 @@ public final class Order {
         }
     }
 
-    public void confirm() {
-        requireDraft();
-        status = Status.CONFIRMED;
-    }
-
     public void startPayment() {
         requireDraft();
         status = Status.PAYMENT_PENDING;

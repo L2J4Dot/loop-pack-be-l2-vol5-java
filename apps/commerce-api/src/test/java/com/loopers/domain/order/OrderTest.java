@@ -15,14 +15,15 @@ class OrderTest {
         return new OrderItem(new ProductId(id), new Quantity(quantity), new Money(price));
     }
     @Test
-    @DisplayName("여러 품목 금액을 합산한 DRAFT 주문을 확정하면 CONFIRMED가 되고 다시 확정하면 거절한다")
+    @DisplayName("여러 품목 금액을 합산한 DRAFT 주문은 결제를 시작해 성공하면 CONFIRMED가 되고 다시 결제를 시작하면 거절한다")
     void confirmsAndRejectsRepeatedConfirmation() {
         Order order = Order.create(1, List.of(item(1, 2, 2000), item(2, 1, 3000)));
         assertThat(order.getTotal()).isEqualTo(new Money(7000));
         assertThat(order.getStatus()).isEqualTo(Order.Status.DRAFT);
-        order.confirm();
+        order.startPayment();
+        order.applyPaymentOutcome(Order.PaymentOutcome.SUCCEEDED);
         assertThat(order.getStatus()).isEqualTo(Order.Status.CONFIRMED);
-        assertThatThrownBy(order::confirm).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(order::startPayment).isInstanceOf(IllegalStateException.class);
     }
     @Test
     @DisplayName("빈 주문과 중복 상품 품목은 거절한다")
@@ -37,7 +38,8 @@ class OrderTest {
         Order order = Order.create(1, List.of(item(1, 1, 0)));
         assertThatThrownBy(() -> order.getItems().clear()).isInstanceOf(UnsupportedOperationException.class);
         assertThat(order.getTotal()).isEqualTo(new Money(0));
-        order.confirm();
+        order.startPayment();
+        order.applyPaymentOutcome(Order.PaymentOutcome.SUCCEEDED);
         assertThat(order.getStatus()).isEqualTo(Order.Status.CONFIRMED);
     }
 

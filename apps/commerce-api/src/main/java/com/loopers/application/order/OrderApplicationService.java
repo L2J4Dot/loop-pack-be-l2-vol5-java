@@ -1,16 +1,18 @@
 package com.loopers.application.order;
 
 import com.loopers.application.order.port.OrderRepository;
+import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.port.PaymentCreateCommand;
+import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentRecordRepository;
-import com.loopers.application.point.port.PointRepository;
 import com.loopers.application.product.ProductNotFoundException;
 import com.loopers.application.product.port.ProductRepository;
 import com.loopers.domain.common.InvalidValueException;
+import com.loopers.domain.common.RuleViolationException;
 import com.loopers.domain.order.Order;
 import com.loopers.domain.order.OrderItem;
 import com.loopers.domain.order.Quantity;
 import com.loopers.domain.payment.PaymentRecord;
-import com.loopers.domain.point.Point;
 import com.loopers.domain.product.Product;
 import com.loopers.domain.product.ProductId;
 import java.util.Comparator;
@@ -19,27 +21,42 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
+// confirm은 PG 호출을 트랜잭션·잠금 밖에 두기 위해 경계를 둘로 나눈다(설계 23절). 같은 객체의 @Transactional 메서드
+// 호출은 프록시를 거치지 않아 경계가 생기지 않으므로, 트랜잭션 A와 결과 반영은 TransactionTemplate으로 연다.
+@Slf4j
 @Service
-@Transactional
 public class OrderApplicationService {
     private final OrderRepository orderRepository;
     private final ProductRepository productRepository;
-    private final PointRepository pointRepository;
     private final PaymentRecordRepository paymentRecordRepository;
+    private final PaymentGatewayRegistry paymentGatewayRegistry;
+    private final TransactionTemplate transactionTemplate;
 
     public OrderApplicationService(OrderRepository orderRepository, ProductRepository productRepository,
-        PointRepository pointRepository, PaymentRecordRepository paymentRecordRepository) {
+        PaymentRecordRepository paymentRecordRepository, PaymentGatewayRegistry paymentGatewayRegistry,
+        TransactionTemplate transactionTemplate) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
-        this.pointRepository = pointRepository;
         this.paymentRecordRepository = paymentRecordRepository;
+        this.paymentGatewayRegistry = paymentGatewayRegistry;
+        this.transactionTemplate = transactionTemplate;
     }
 
     public record ItemRequest(long productId, int quantity) { }
 
+    private record PaymentStart(OrderResult current, PaymentRecord payment) {
+        boolean newlyStarted() {
+            return current == null;
+        }
+    }
+
+    @Transactional
     public OrderResult create(long userId, List<ItemRequest> requested) {
         if (requested == null || requested.isEmpty() || requested.size() > 100) {
             throw new InvalidValueException("주문 품목은 1~100개여야 합니다.");
@@ -57,29 +74,106 @@ public class OrderApplicationService {
         return OrderResult.from(orderRepository.save(Order.create(userId, items)), Optional.empty());
     }
 
-    public OrderResult confirm(long userId, long orderId) {
-        // 잠금 순서: 주문 → 상품 ID 오름차순 → 포인트. 다른 변경 경로도 이 순서를 지켜야 교착을 피할 수 있다.
+    public OrderResult confirm(long userId, long orderId, ConfirmCommand command) {
+        PaymentStart start = transactionTemplate.execute(status -> startPayment(userId, orderId, command.attemptKey()));
+        if (!start.newlyStarted()) {
+            // 이미 발송 시작된 결제는 결과를 모르더라도 create를 다시 보내지 않는다. 확인은 조회로만 한다(설계 23절).
+            return start.current();
+        }
+        PaymentRecord payment = start.payment();
+        PaymentCreateResult created = paymentGatewayRegistry.get(payment.getProviderId()).create(new PaymentCreateCommand(
+            payment.getProviderOrderId(), command.cardType(), command.cardNo(), payment.getAmount()));
+        return applyPaymentResult(orderId, PaymentReport.from(created));
+    }
+
+    // PG가 보고한 결과 하나를 반영하는 유일한 경계. create 응답·조회·callback 모두 여기로 모은다(설계 23절).
+    // 잠금 순서는 confirm과 같은 주문 → 상품 ID 오름차순이다. 상품은 실패로 재고를 돌려줄 때만 잠근다.
+    public OrderResult applyPaymentResult(long orderId, PaymentReport report) {
+        return transactionTemplate.execute(status -> {
+            Order order = orderRepository.findByIdForUpdate(orderId).orElseThrow(OrderNotFoundException::new);
+            Optional<PaymentRecord> found = paymentRecordRepository.findByOrderId(orderId);
+            if (found.isEmpty() || found.get().getMethod() != PaymentRecord.Method.PG) {
+                log.warn("PG 결제 기록이 없는 주문에 결제 결과가 들어왔습니다. orderId={}, providerStatus={}", orderId, report.status());
+                return OrderResult.from(order, found);
+            }
+            PaymentRecord payment = found.get();
+            Order.PaymentTransition transition = order.applyPaymentOutcome(report.outcome());
+            switch (transition) {
+                case CHANGED -> {
+                    if (order.getStatus() == Order.Status.PAYMENT_FAILED) {
+                        returnReservedStock(order);
+                    }
+                    orderRepository.save(order);
+                    payment.applyProviderReport(report.status(), report.transactionKey());
+                    payment = paymentRecordRepository.save(payment);
+                }
+                case UNCHANGED -> {
+                    if (order.getStatus() == Order.Status.PAYMENT_PENDING) {
+                        payment.applyProviderReport(report.status(), report.transactionKey());
+                        payment = paymentRecordRepository.save(payment);
+                    }
+                }
+                case CONFLICT -> log.warn("종결된 주문에 반대 결제 결과가 들어와 반영하지 않았습니다. orderId={}, status={}, providerStatus={}",
+                    orderId, order.getStatus(), report.status());
+                case ANOMALY -> log.warn("결제를 시작하지 않은 주문에 결제 결과가 들어왔습니다. orderId={}, providerStatus={}",
+                    orderId, report.status());
+            }
+            return OrderResult.from(order, Optional.of(payment));
+        });
+    }
+
+    // 트랜잭션 A. 주문 잠금 → 본인·상태·시도 키 확인 → 상품 ID 오름차순 잠금·재고 확보 → 결제 기록(발송 시작) → 결제 대기.
+    // 재고 부족·삭제 상품이면 예외로 전체 rollback되어 PG는 한 번도 부르지 않는다. 1회 발송은 주문 상태 잠금이 지킨다.
+    private PaymentStart startPayment(long userId, long orderId, String attemptKey) {
         Order order = orderRepository.findByIdForUpdate(orderId)
             .filter(found -> found.getUserId() == userId)
             .orElseThrow(OrderNotFoundException::new);
-        order.requireDraft();
-        List<OrderItem> itemsByProductId = order.getItems().stream()
-            .sorted(Comparator.comparingLong(orderItem -> orderItem.productId().value()))
-            .toList();
-        for (OrderItem item : itemsByProductId) {
+        if (order.getStatus() != Order.Status.DRAFT) {
+            PaymentRecord payment = paymentRecordRepository.findByOrderId(orderId)
+                .filter(found -> attemptKey.equals(found.getAttemptKey()))
+                .orElseThrow(() -> new RuleViolationException("이미 다른 결제가 진행되었거나 끝난 주문입니다."));
+            return new PaymentStart(OrderResult.from(order, Optional.of(payment)), payment);
+        }
+        if (paymentRecordRepository.findByAttemptKey(attemptKey).isPresent()) {
+            throw new RuleViolationException("다른 주문에 사용한 결제 시도 키입니다.");
+        }
+        reserveStock(order);
+        order.startPayment();
+        orderRepository.save(order);
+        String providerId = paymentGatewayRegistry.inPriorityOrder().get(0).providerId();
+        try {
+            PaymentRecord payment = paymentRecordRepository.save(
+                PaymentRecord.pgStarted(orderId, order.getTotal(), attemptKey, providerId));
+            return new PaymentStart(null, payment);
+        } catch (DataIntegrityViolationException e) {
+            // 같은 시도 키를 다른 주문이 동시에 쓴 경쟁. 사전 확인을 통과했어도 유일 제약이 막는다.
+            throw new RuleViolationException("다른 주문에 사용한 결제 시도 키입니다.", e);
+        }
+    }
+
+    private void reserveStock(Order order) {
+        for (OrderItem item : itemsByProductId(order)) {
             Product product = productRepository.findByIdForUpdate(item.productId())
                 .filter(found -> !found.isDeleted())
                 .orElseThrow(ProductNotFoundException::new);
             product.decreaseStock(item.quantity().value());
             productRepository.save(product);
         }
-        Point point = pointRepository.findOrCreateForUpdate(userId);
-        point.pay(order.getTotal());
-        pointRepository.save(point);
-        order.confirm();
-        Order confirmed = orderRepository.save(order);
-        PaymentRecord payment = paymentRecordRepository.save(PaymentRecord.point(confirmed.getId(), confirmed.getTotal()));
-        return OrderResult.from(confirmed, Optional.of(payment));
+    }
+
+    // 결제 대기 중 삭제된 상품도 반환한다. 삭제 상태는 유지되어 다시 노출되지 않는다.
+    private void returnReservedStock(Order order) {
+        for (OrderItem item : itemsByProductId(order)) {
+            Product product = productRepository.findByIdForUpdate(item.productId()).orElseThrow(ProductNotFoundException::new);
+            product.returnStock(item.quantity().value());
+            productRepository.save(product);
+        }
+    }
+
+    private List<OrderItem> itemsByProductId(Order order) {
+        return order.getItems().stream()
+            .sorted(Comparator.comparingLong(orderItem -> orderItem.productId().value()))
+            .toList();
     }
 
     @Transactional(readOnly = true)
