@@ -30,23 +30,33 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 // 저장소 빈을 실패 주입용으로 바꿔 끼우는 테스트만 모은 클래스. 실패 직전 flush로 SQL이 나간 상태를 만들고,
 // 서비스 트랜잭션이 끝난 뒤 새 트랜잭션에서 재조회한다.
 @SpringBootTest
+@AutoConfigureMockMvc
 @Import(OrderTransactionTest.FailureInjectionConfig.class)
 class OrderTransactionTest {
     private static final long BALANCE = 10000;
+
+    @Autowired
+    private MockMvc mvc;
 
     @Autowired
     private BrandApplicationService brandApplicationService;
@@ -148,13 +158,17 @@ class OrderTransactionTest {
 
     @Test
     @DisplayName("PG가 SUCCESS로 응답한 뒤 결과 반영(트랜잭션 B)의 결제 기록 저장이 실패하면 주문은 결제 대기·재고 확보 유지·create 1회로 남는다")
-    void keepsPendingWhenResultSaveFailsAfterPgSuccess() {
+    void keepsPendingWhenResultSaveFailsAfterPgSuccess() throws Exception {
         server.createBehavior(CreateBehavior.ACCEPT_SUCCESS);
         failingPaymentRecordRepository.failOnSave(2);
 
-        assertThatThrownBy(() -> orderApplicationService.confirm(1, orderId, TestPgFixture.command()))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessage(FailingPaymentRecordRepository.INJECTED_FAILURE);
+        mvc.perform(post("/api/v1/orders/{id}/confirm", orderId).header("X-USER-ID", "1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"paymentAttemptKey\":\"" + UUID.randomUUID()
+                    + "\",\"cardType\":\"" + TestPgFixture.CARD_TYPE + "\",\"cardNo\":\"" + TestPgFixture.CARD_NO + "\"}"))
+            .andExpect(status().isAccepted())
+            .andExpect(jsonPath("$.data.status").value("PAYMENT_PENDING"))
+            .andExpect(jsonPath("$.data.statusUrl").value("/api/v1/orders/" + orderId));
 
         assertThat(failingPaymentRecordRepository.stateBeforeFailure()).isEqualTo("stock=3/4, order=CONFIRMED");
         assertState("PAYMENT_PENDING", 3, 4, 1);

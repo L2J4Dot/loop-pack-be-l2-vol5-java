@@ -111,6 +111,21 @@ class OrderPaymentApiIntegrationTest {
     }
 
     @Test
+    @DisplayName("PG가 202와 FAILED로 접수하면 200 결제 실패로 끝나고 재고 반환은 한 번이며 거래 1건·create 1회다")
+    void failsOnAcceptedFailedAndReturnsStockOnce() throws Exception {
+        server.createBehavior(CreateBehavior.ACCEPT_FAILED);
+        String key = UUID.randomUUID().toString();
+
+        confirm(1, orderId, key)
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.status").value("PAYMENT_FAILED"));
+        assertScene("PAYMENT_FAILED", 5, 5, "FAILED", "FAILED", 1, 1);
+
+        confirm(1, orderId, key).andExpect(status().isOk());
+        assertScene("PAYMENT_FAILED", 5, 5, "FAILED", "FAILED", 1, 1);
+    }
+
+    @Test
     @DisplayName("PG가 효과 없는 거절(422)로 응답하면 200·결제 실패이고 재고를 원래 값으로 한 번 돌려주며 거래 0건·create 1회다")
     void failsOnRejectionAndReturnsStockOnce() throws Exception {
         server.createBehavior(CreateBehavior.REJECT_BEFORE_CREATE);

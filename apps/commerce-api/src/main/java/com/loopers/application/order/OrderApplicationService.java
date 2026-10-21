@@ -83,7 +83,15 @@ public class OrderApplicationService {
         PaymentRecord payment = start.payment();
         PaymentCreateResult created = paymentGatewayRegistry.get(payment.getProviderId()).create(new PaymentCreateCommand(
             payment.getProviderOrderId(), command.cardType(), command.cardNo(), payment.getAmount()));
-        return applyPaymentResult(orderId, PaymentReport.from(created));
+        PaymentReport report = PaymentReport.from(created);
+        try {
+            return applyPaymentResult(orderId, report);
+        } catch (RuntimeException e) {
+            // 외부 결제 사실은 rollback할 수 없으므로 저장된 주문을 새로 읽어 확인 경로로 돌려준다.
+            log.error("PG 호출 후 결과 저장에 실패했습니다.orderId={}, providerStatus={}", orderId, report.status());
+            return transactionTemplate.execute(status -> withPayment(
+                orderRepository.findById(orderId).orElseThrow(OrderNotFoundException::new)));
+        }
     }
 
     // PG가 보고한 결과 하나를 반영하는 유일한 경계. create 응답·조회·callback 모두 여기로 모은다(설계 23절).
