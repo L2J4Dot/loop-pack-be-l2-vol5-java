@@ -191,7 +191,7 @@ class PaymentVerificationApiIntegrationTest {
     }
 
     @Test
-    @DisplayName("거래 0건을 반복 조회하면 같은 이상 횟수가 늘고 이후 성공으로 종결되면 일시적 이상을 해결한다")
+    @DisplayName("거래 0건의 이상은 반복 누적 후 성공하면 해결되며 종결 뒤 0건 조회로 다시 열리지 않는다")
     void accumulatesAndResolvesNoTransaction() throws Exception {
         start(CreateBehavior.ERROR_500_WITHOUT_CREATE);
         reconcile().andExpect(status().isOk())
@@ -208,7 +208,36 @@ class PaymentVerificationApiIntegrationTest {
         server.removeTransaction(transactionKey());
         reconcile().andExpect(status().isOk());
         scene("CONFIRMED", 3, "SUCCESS", 0, 1, 4);
-        anomaly("NO_TRANSACTION", 3, false);
+        anomaly("NO_TRANSACTION", 2, true);
+    }
+
+    @Test
+    @DisplayName("CONFIRMED 주문의 중복 callback에서 PG 조회가 실패해도 상태·재고를 유지하고 이상을 남기지 않는다")
+    void doesNotRecordLookupFailureForConfirmedOrder() throws Exception {
+        start(CreateBehavior.ACCEPT_SUCCESS);
+        server.lookupBehavior(LookupBehavior.ERROR_500);
+
+        callback("SUCCESS").andExpect(status().isOk());
+        callback("SUCCESS").andExpect(status().isOk());
+
+        scene("CONFIRMED", 3, "SUCCESS", 1, 1, 2);
+        assertThat(anomalyCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("결제 대기 주문에 해결된 거래 없음 이상이 다시 생기면 같은 행의 횟수를 늘리고 해결 시각을 비운다")
+    void reopensResolvedAnomalyOnlyWhilePending() throws Exception {
+        start(CreateBehavior.ERROR_500_WITHOUT_CREATE);
+        reconcile().andExpect(status().isOk());
+        jdbc.update("update payment_anomalies set resolved_at = first_seen_at where order_id = ? and kind = 'NO_TRANSACTION'",
+            orderId);
+        anomaly("NO_TRANSACTION", 1, true);
+
+        reconcile().andExpect(status().isOk());
+
+        scene("PAYMENT_PENDING", 3, "UNKNOWN", 0, 1, 2);
+        anomaly("NO_TRANSACTION", 2, false);
+        assertThat(anomalyCount()).isEqualTo(1);
     }
 
     @ParameterizedTest(name = "조회 실패={0}")

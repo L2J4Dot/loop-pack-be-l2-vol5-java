@@ -172,6 +172,30 @@ class OrderPaymentFallbackIntegrationTest {
     }
 
     @Test
+    @DisplayName("모든 PG 미발송으로 종결된 주문의 callback이 sub에서 거래 0건을 조회해도 이상을 남기지 않는다")
+    void doesNotRecordNoTransactionAfterAllNotSent() throws Exception {
+        closeMain();
+        sub.close();
+        subClosed = true;
+        confirm().andExpect(status().isOk());
+        scene("PAYMENT_FAILED", 5, "sub", "ALL_NOT_SENT", 0, 0, 0, 0);
+
+        // 연결 실패 뒤 PG가 다시 가용해진 장면이다. 조회 어댑터만 새 fixture 주소로 연결한다.
+        sub = new TestPgServer("135135", Duration.ofMillis(1500));
+        subClosed = false;
+        when(registry.get("sub")).thenReturn(gateway("sub", sub));
+        mvc.perform(post("/api/v1/payments/callback").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"transactionKey\":\"UNVERIFIED-KEY\",\"orderId\":\""
+                    + String.format("LP-ORD-%010d", orderId) + "\",\"amount\":2000,\"status\":\"FAILED\"}"))
+            .andExpect(status().isOk());
+
+        scene("PAYMENT_FAILED", 5, "sub", "ALL_NOT_SENT", 0, 0, 0, 0);
+        assertThat(main.lookupCalls()).isZero();
+        assertThat(sub.lookupCalls()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from payment_anomalies", Long.class)).isZero();
+    }
+
+    @Test
     @DisplayName("sub 전환 저장 직후 발송 전 중단되면 sub 발송 시작을 유지하고 같은 키 재요청은 재발송하지 않는다")
     void doesNotResendAfterSwitchCommit() throws Exception {
         closeMain();

@@ -183,14 +183,14 @@ public class OrderApplicationService {
                 recordCallbackKeyMismatch(order.getId(), payment.getTransactionKey(), callbackKey);
             }
             if (lookup instanceof PaymentTransactionsLookup.Failed) {
-                recordAnomaly(order.getId(), Kind.LOOKUP_FAILED, "lookupFailed=true");
+                recordTransientAnomaly(order, Kind.LOOKUP_FAILED, "lookupFailed=true");
                 return OrderResult.from(order, Optional.of(payment));
             }
             PaymentTransactionsLookup.Found found = (PaymentTransactionsLookup.Found) lookup;
             List<PaymentTransaction> transactions = found.transactions();
             if (transactions.isEmpty()) {
                 // 0건은 효과 없음의 증거가 아니다. 저장 키가 있어도 재발송·실패 확정하지 않는다.
-                recordAnomaly(order.getId(), Kind.NO_TRANSACTION,
+                recordTransientAnomaly(order, Kind.NO_TRANSACTION,
                     "count=0, storedKeyPresent=" + (payment.getTransactionKey() != null));
                 return OrderResult.from(order, Optional.of(payment));
             }
@@ -214,6 +214,16 @@ public class OrderApplicationService {
                 transaction.transactionKey());
             return applyLocked(order, Optional.of(payment), report, manual);
         });
+    }
+
+    private void recordTransientAnomaly(Order order, Kind kind, String summary) {
+        if (order.getStatus() == Order.Status.PAYMENT_PENDING) {
+            recordAnomaly(order.getId(), kind, summary);
+        } else {
+            // 종결 후의 불확실한 조회로 해결된 이상을 다시 열거나 영구히 미해결인 행을 만들지 않는다.
+            log.info("결제 대기가 아닌 주문의 미확정 PG 조회 결과입니다. orderId={}, status={}, kind={}",
+                order.getId(), order.getStatus(), kind);
+        }
     }
 
     private void recordCallbackKeyMismatch(long orderId, String comparisonKey, String callbackKey) {
