@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Optional;
 
 public record OrderResult(long id, long userId, List<Item> items, long total, String status, long paidAmount,
-    String paymentResult, String paymentMethod) {
+    String paymentResult, String paymentMethod, String providerStatus) {
     public record Item(long productId, int quantity, long unitPrice) { }
 
     static OrderResult from(Order order, Optional<PaymentRecord> payment) {
@@ -18,6 +18,7 @@ public record OrderResult(long id, long userId, List<Item> items, long total, St
         String paymentResult = payment.map(found -> found.getResult().name()).orElse("NOT_PAID");
         String paymentMethod = payment.map(found -> found.getMethod().name()).orElse(null);
         return new OrderResult(order.getId(), order.getUserId(), items, order.getTotal().value(), order.getStatus().name(),
-            paidAmount, paymentResult, paymentMethod);
+            paidAmount, paymentResult, paymentMethod,
+            payment.map(PaymentRecord::getProviderStatus).map(Enum::name).orElse(null));
     }
 }

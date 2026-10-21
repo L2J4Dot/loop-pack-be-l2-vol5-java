@@ -172,6 +172,13 @@ public class OrderApplicationService {
         verifyPayment(payment, LookupSource.CALLBACK, callbackKey);
     }
 
+    public OrderResult reconcileMyPayment(long userId, long orderId) {
+        orderRepository.findById(orderId)
+            .filter(order -> order.getUserId() == userId)
+            .orElseThrow(OrderNotFoundException::new);
+        return reconcilePayment(orderId);
+    }
+
     public OrderResult reconcilePayment(long orderId) {
         orderRepository.findById(orderId).orElseThrow(OrderNotFoundException::new);
         PaymentRecord payment = paymentRecordRepository.findByOrderId(orderId)

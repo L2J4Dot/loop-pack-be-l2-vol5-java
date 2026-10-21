@@ -43,9 +43,20 @@ public class OrderController {
         @PathVariable long id, @RequestBody ConfirmRequest request) {
         long userId = identity.require(user);
         OrderResult result = service.confirm(userId, id, request.toCommand());
+        return paymentResponse(result);
+    }
+
+    @PostMapping("/api/v1/orders/{id}/payment/reconcile")
+    public ResponseEntity<ApiResponse<?>> reconcile(@RequestHeader(value = "X-USER-ID", required = false) String user,
+        @PathVariable long id) {
+        return paymentResponse(service.reconcileMyPayment(identity.require(user), id));
+    }
+
+    private ResponseEntity<ApiResponse<?>> paymentResponse(OrderResult result) {
         if (result.status().equals("PAYMENT_PENDING")) {
             return ResponseEntity.status(HttpStatus.ACCEPTED).body(ApiResponse.success(
-                new PaymentPendingResponse(result.id(), result.status(), "/api/v1/orders/" + result.id())));
+                new PaymentPendingResponse(result.id(), result.status(), "/api/v1/orders/" + result.id(),
+                    result.paymentResult(), result.providerStatus())));
         }
         return ResponseEntity.ok(ApiResponse.success(result));
     }
@@ -81,6 +92,7 @@ public class OrderController {
         }
     }
 
-    public record PaymentPendingResponse(long id, String status, String statusUrl) { }
+    public record PaymentPendingResponse(long id, String status, String statusUrl, String paymentResult,
+        String providerStatus) { }
     public record ItemRequest(JsonNode productId, JsonNode quantity) { }
 }

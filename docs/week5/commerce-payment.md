@@ -805,6 +805,12 @@ flowchart LR
 
 ### 입력 경로와 경계
 
+- **과제 원문 계약 반영(2026-10-21 사용자 지시):** 고객 본인 주문 `POST /api/v1/orders/{orderId}/payment/reconcile`을 제공한다. X-USER-ID 식별·소유권을 PG 조회 전에 확인하며 타인·없는 주문은 404, 식별 누락은 401, PG 결제가 아니면 409다. 기존 관리자 reconcile은 확장 API로 유지한다.
+- 고객 reconcile은 미완료 PAYMENT_PENDING이면 202 + 주문 ID·주문 상태·결제 결과·PG 시도 상태(`providerStatus`)·주문 상세 조회 경로(`statusUrl`), 종결이면 200 + 주문 결과를 반환한다. 실제 조회 실패도 미완료이면 202 + 현재 상태이며 LOOKUP_FAILED를 기록한다. 회로 미호출은 기존 503 오류 계약을 적용하며 상태를 바꾸지 않는다.
+- confirm의 202와 고객·관리자 주문 조회도 providerStatus로 PENDING·UNKNOWN·NEEDS_REVIEW를 구분한다. 포인트·결제 전 주문에는 PG 상태가 없다. 기존 응답 필드는 유지한다.
+- 고객의 명시적 reconcile도 수동 확인 경로이며 일치하는 확정 결과로 확인 필요를 해제할 수 있다. 관리자 미완료 200·실제 PG 실패 200·회로 미호출 503의 기존 확장 계약은 유지한다.
+
+
 - callback: `POST /api/v1/payments/callback`, 본문 `{transactionKey, orderId, amount, status}`. 본문은 신호일 뿐 status·금액·키를 결제 결과에 반영하지 않는다. providerOrderId로 결제 기록을 찾고 저장된 providerId·providerOrderId·거래 키로 PG를 조회한다.
 - 처리 순서: 결제 기록 찾기 → 트랜잭션 밖·잠금 없이 PG 조회 → 결과 반영 경계. 확인 필요(`NEEDS_REVIEW`) 기록은 callback 조회에서 제외한다(D41).
 - callback 키는 저장된 거래 키가 있으면 그 키와 비교한다. 저장 키가 없으면 조회 결과가 정확히 1건이고 주문 ID·금액이 일치할 때 그 거래 키와 비교한다. 비교 대상이 없으면(조회 실패·0건·2건 이상·불일치) 키 불일치 이상을 기록하지 않는다. 다르면 `CALLBACK_KEY_MISMATCH`(영구적)만 기록하고 확인 필요로 바꾸지 않으며 조회 결과 반영은 그대로 진행한다.

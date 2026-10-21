@@ -49,6 +49,7 @@ import org.springframework.test.web.servlet.ResultActions;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -90,6 +91,66 @@ class PaymentVerificationApiIntegrationTest {
     private void start(CreateBehavior behavior) {
         server.createBehavior(behavior);
         orders.confirm(1, orderId, TestPgFixture.command());
+    }
+
+    @Test
+    @DisplayName("주문 상세는 확인 필요를 표시하고 본인 수동 재조회만 깨끗한 성공으로 이를 해제한다")
+    void customerSeesAndResolvesReview() throws Exception {
+        start(CreateBehavior.ACCEPT_PENDING);
+        String key = transactionKey();
+        server.replaceTransaction(key, providerOrderId(), 999, "SUCCESS");
+        orders.reconcilePayment(orderId);
+        mvc.perform(get("/api/v1/orders/{id}", orderId).header("X-USER-ID", "1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.providerStatus").value("NEEDS_REVIEW"));
+        server.replaceTransaction(key, providerOrderId(), 2000, "SUCCESS");
+        mvc.perform(post("/api/v1/orders/{id}/payment/reconcile", orderId).header("X-USER-ID", "1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.providerStatus").value("SUCCESS"));
+        scene("CONFIRMED", 3, "SUCCESS", 1, 1, 2);
+    }
+
+    @Test
+    @DisplayName("본인 재조회는 처리 중이면 202와 시도 상태·조회 경로를 반환하고 성공 후에는 200으로 한 번 확정한다")
+    void customerReconcilesPendingThenSuccess() throws Exception {
+        start(CreateBehavior.ACCEPT_PENDING);
+        mvc.perform(post("/api/v1/orders/{id}/payment/reconcile", orderId).header("X-USER-ID", "1"))
+            .andExpect(status().isAccepted())
+            .andExpect(jsonPath("$.data.status").value("PAYMENT_PENDING"))
+            .andExpect(jsonPath("$.data.providerStatus").value("PENDING"))
+            .andExpect(jsonPath("$.data.statusUrl").value("/api/v1/orders/" + orderId));
+        scene("PAYMENT_PENDING", 3, "PENDING", 1, 1, 1);
+        server.changeStatus(transactionKey(), "SUCCESS");
+        mvc.perform(post("/api/v1/orders/{id}/payment/reconcile", orderId).header("X-USER-ID", "1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.status").value("CONFIRMED"));
+        scene("CONFIRMED", 3, "SUCCESS", 1, 1, 2);
+    }
+
+    @Test
+    @DisplayName("고객 재조회는 타인·없는 주문과 식별 누락을 PG 호출 전에 거절한다")
+    void customerReconcileProtectsOwnership() throws Exception {
+        start(CreateBehavior.ACCEPT_PENDING);
+        users.save(new UserJpaEntity(2));
+        mvc.perform(post("/api/v1/orders/{id}/payment/reconcile", orderId).header("X-USER-ID", "2"))
+            .andExpect(status().isNotFound());
+        mvc.perform(post("/api/v1/orders/{id}/payment/reconcile", 999999).header("X-USER-ID", "1"))
+            .andExpect(status().isNotFound());
+        mvc.perform(post("/api/v1/orders/{id}/payment/reconcile", orderId))
+            .andExpect(status().isUnauthorized());
+        scene("PAYMENT_PENDING", 3, "PENDING", 1, 1, 0);
+    }
+
+    @Test
+    @DisplayName("고객 재조회에서 실제 PG 조회가 실패하면 202와 현재 상태를 반환하고 조회 실패 이상을 남긴다")
+    void customerLookupFailureIsPending() throws Exception {
+        start(CreateBehavior.ACCEPT_PENDING);
+        server.lookupBehavior(LookupBehavior.ERROR_500);
+        mvc.perform(post("/api/v1/orders/{id}/payment/reconcile", orderId).header("X-USER-ID", "1"))
+            .andExpect(status().isAccepted())
+            .andExpect(jsonPath("$.data.statusUrl").value("/api/v1/orders/" + orderId));
+        scene("PAYMENT_PENDING", 3, "PENDING", 1, 1, 1);
+        anomaly("LOOKUP_FAILED", 1, false);
     }
 
     @Test
