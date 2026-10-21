@@ -12,7 +12,6 @@ import com.loopers.application.payment.port.PaymentGateway;
 import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
 import com.loopers.application.payment.port.PaymentLookupScheduleRepository.Schedule;
 import com.loopers.application.payment.port.PaymentRecordRepository;
-import com.loopers.application.payment.port.PaymentTransaction;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import com.loopers.application.product.ProductNotFoundException;
 import com.loopers.application.product.port.ProductRepository;
@@ -70,7 +69,13 @@ public class OrderApplicationService {
 
     public record ItemRequest(long productId, int quantity) { }
 
-    private enum LookupSource { CALLBACK, MANUAL, AUTOMATIC }
+    private enum PaymentSource {
+        CREATE, CALLBACK, MANUAL, AUTOMATIC;
+
+        boolean canResolveReview() {
+            return this == MANUAL;
+        }
+    }
 
     private record PaymentStart(OrderResult current, PaymentRecord payment) {
         boolean newlyStarted() {
@@ -155,7 +160,7 @@ public class OrderApplicationService {
     public OrderResult applyPaymentResult(long orderId, PaymentReport report) {
         return transactionTemplate.execute(status -> {
             Order order = orderRepository.findByIdForUpdate(orderId).orElseThrow(OrderNotFoundException::new);
-            return applyLocked(order, paymentRecordRepository.findByOrderId(orderId), report, false);
+            return applyLocked(order, paymentRecordRepository.findByOrderId(orderId), report, PaymentSource.CREATE);
         });
     }
 
@@ -169,7 +174,7 @@ public class OrderApplicationService {
         if (payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW) {
             return;
         }
-        verifyPayment(payment, LookupSource.CALLBACK, callbackKey);
+        verifyPayment(payment, PaymentSource.CALLBACK, callbackKey);
     }
 
     public OrderResult reconcileMyPayment(long userId, long orderId) {
@@ -184,7 +189,7 @@ public class OrderApplicationService {
         PaymentRecord payment = paymentRecordRepository.findByOrderId(orderId)
             .filter(found -> found.getMethod() == PaymentRecord.Method.PG)
             .orElseThrow(() -> new RuleViolationException("PG 결제가 아닌 주문은 조회 확정할 수 없습니다."));
-        return verifyPayment(payment, LookupSource.MANUAL, null);
+        return verifyPayment(payment, PaymentSource.MANUAL, null);
     }
 
     public void reconcileDuePayments() {
@@ -193,7 +198,7 @@ public class OrderApplicationService {
             try {
                 Optional<PaymentRecord> payment = paymentRecordRepository.findByOrderId(orderId);
                 if (payment.isPresent() && payment.get().getProviderStatus() != PaymentRecord.ProviderStatus.NEEDS_REVIEW) {
-                    verifyPayment(payment.get(), LookupSource.AUTOMATIC, null);
+                    verifyPayment(payment.get(), PaymentSource.AUTOMATIC, null);
                 }
             } catch (RuntimeException e) {
                 log.error("주문 자동 재조회 처리 실패. orderId={}, causeType={}", orderId, e.getClass().getSimpleName());
@@ -201,14 +206,14 @@ public class OrderApplicationService {
         }
     }
 
-    private OrderResult verifyPayment(PaymentRecord requested, LookupSource source, String callbackKey) {
+    private OrderResult verifyPayment(PaymentRecord requested, PaymentSource source, String callbackKey) {
         // callback 본문은 누구나 보낼 수 있는 신호다. 저장된 값으로 잠금·트랜잭션 밖에서 PG를 조회한다.
         PaymentTransactionsLookup lookup = paymentGatewayRegistry.get(requested.getProviderId())
             .verifyOrder(requested.getProviderOrderId(), requested.getTransactionKey());
         if (lookup instanceof PaymentTransactionsLookup.NotCalled) {
             log.info("조회 회로 정책으로 PG를 호출하지 않았습니다. orderId={}, providerId={}, source={}",
                 requested.getOrderId(), requested.getProviderId(), source);
-            if (source == LookupSource.MANUAL) {
+            if (source == PaymentSource.MANUAL) {
                 throw new PaymentLookupNotCalledException();
             }
         }
@@ -216,11 +221,11 @@ public class OrderApplicationService {
             Order order = orderRepository.findByIdForUpdate(requested.getOrderId()).orElseThrow(OrderNotFoundException::new);
             PaymentRecord payment = paymentRecordRepository.findByOrderId(order.getId()).orElseThrow();
             if (!payment.getProviderId().equals(requested.getProviderId())
-                || (source != LookupSource.MANUAL && payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW)) {
+                || (source != PaymentSource.MANUAL && payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW)) {
                 return OrderResult.from(order, Optional.of(payment));
             }
             OrderResult result = applyLookupLocked(order, payment, lookup, source, callbackKey);
-            if (source == LookupSource.AUTOMATIC) {
+            if (source == PaymentSource.AUTOMATIC) {
                 advanceLookupSchedule(order, payment, lookup);
             }
             return result;
@@ -228,47 +233,20 @@ public class OrderApplicationService {
     }
 
     private OrderResult applyLookupLocked(Order order, PaymentRecord payment, PaymentTransactionsLookup lookup,
-        LookupSource source, String callbackKey) {
-        if (lookup instanceof PaymentTransactionsLookup.NotCalled) {
-            return OrderResult.from(order, Optional.of(payment));
+        PaymentSource source, String callbackKey) {
+        PaymentLookupAssessment assessment = PaymentLookupAssessment.assess(payment, lookup);
+        if (source == PaymentSource.CALLBACK) {
+            recordCallbackKeyMismatch(order.getId(), assessment.callbackComparisonKey(), callbackKey);
         }
-        if (source == LookupSource.CALLBACK) {
-            recordCallbackKeyMismatch(order.getId(), payment.getTransactionKey(), callbackKey);
-        }
-        if (lookup instanceof PaymentTransactionsLookup.Failed) {
-            recordTransientAnomaly(order, Kind.LOOKUP_FAILED, "lookupFailed=true");
-            return OrderResult.from(order, Optional.of(payment));
-        }
-        PaymentTransactionsLookup.Found found = (PaymentTransactionsLookup.Found) lookup;
-        List<PaymentTransaction> transactions = found.transactions();
-        if (transactions.isEmpty()) {
-            // 0건은 효과 없음의 증거가 아니다. 저장 키가 있어도 재발송·실패 확정하지 않는다.
-            recordTransientAnomaly(order, Kind.NO_TRANSACTION,
-                "count=0, storedKeyPresent=" + (payment.getTransactionKey() != null));
-            return OrderResult.from(order, Optional.of(payment));
-        }
-        if (found.coverage() == PaymentTransactionsLookup.Coverage.ALL && transactions.size() > 1) {
-            return requireReview(order, payment, Kind.DUPLICATE_TRANSACTIONS, "count=" + transactions.size());
-        }
-        if (found.coverage() == PaymentTransactionsLookup.Coverage.SINGLE && transactions.size() > 1) {
-            return requireReview(order, payment, Kind.COVERAGE_CONTRACT_VIOLATION, "count=" + transactions.size());
-        }
-        PaymentTransaction transaction = transactions.get(0);
-        boolean orderMatches = payment.getProviderOrderId().equals(transaction.providerOrderId());
-        boolean amountMatches = payment.getAmount().equals(transaction.amount());
-        boolean keyMatches = payment.getTransactionKey() == null
-            || payment.getTransactionKey().equals(transaction.transactionKey());
-        if (!orderMatches || !amountMatches || !keyMatches) {
-            return requireReview(order, payment, Kind.TRANSACTION_MISMATCH,
-                "orderMatches=" + orderMatches + ", amountMatches=" + amountMatches + ", keyMatches=" + keyMatches);
-        }
-        if (source == LookupSource.CALLBACK && payment.getTransactionKey() == null && transactions.size() == 1) {
-            // 저장 키가 없으면 주문 ID·금액이 일치하는 단일 조회 거래만 비교 근거로 쓴다.
-            recordCallbackKeyMismatch(order.getId(), transaction.transactionKey(), callbackKey);
-        }
-        PaymentReport report = new PaymentReport(PaymentRecord.ProviderStatus.valueOf(transaction.status().name()),
-            transaction.transactionKey());
-        return applyLocked(order, Optional.of(payment), report, source == LookupSource.MANUAL);
+        return switch (assessment) {
+            case PaymentLookupAssessment.NotCalled notCalled -> OrderResult.from(order, Optional.of(payment));
+            case PaymentLookupAssessment.Uncertain uncertain -> {
+                recordTransientAnomaly(order, uncertain.kind(), uncertain.summary());
+                yield OrderResult.from(order, Optional.of(payment));
+            }
+            case PaymentLookupAssessment.Review review -> requireReview(order, payment, review.kind(), review.summary());
+            case PaymentLookupAssessment.Verified verified -> applyLocked(order, Optional.of(payment), verified.report(), source);
+        };
     }
 
     private void advanceLookupSchedule(Order order, PaymentRecord payment, PaymentTransactionsLookup lookup) {
@@ -317,7 +295,7 @@ public class OrderApplicationService {
         return OrderResult.from(order, Optional.of(paymentRecordRepository.save(payment)));
     }
 
-    private OrderResult applyLocked(Order order, Optional<PaymentRecord> found, PaymentReport report, boolean manual) {
+    private OrderResult applyLocked(Order order, Optional<PaymentRecord> found, PaymentReport report, PaymentSource source) {
         if (order.getStatus() == Order.Status.DRAFT) {
             recordAnomaly(order.getId(), Kind.RESULT_BEFORE_PAYMENT, "status=" + report.status());
             log.warn("결제를 시작하지 않은 주문에 결제 결과가 들어왔습니다. orderId={}, providerStatus={}",
@@ -331,7 +309,7 @@ public class OrderApplicationService {
         PaymentRecord payment = found.get();
         // 확인 필요는 수동 reconcile의 깨끗한 확정 결과만 해제한다. 미확정 보고는 키와 상태를 보존한다.
         if (payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW
-            && (!manual || report.outcome() == Order.PaymentOutcome.UNKNOWN)) {
+            && (!source.canResolveReview() || report.outcome() == Order.PaymentOutcome.UNKNOWN)) {
             return OrderResult.from(order, found);
         }
         Order.PaymentTransition transition = order.applyPaymentOutcome(report.outcome());

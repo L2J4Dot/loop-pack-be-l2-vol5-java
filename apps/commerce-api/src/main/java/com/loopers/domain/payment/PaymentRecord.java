@@ -68,6 +68,17 @@ public final class PaymentRecord {
             providerStatus);
     }
 
+    public record TransactionMatch(boolean orderMatches, boolean amountMatches, boolean keyMatches) {
+        public boolean matches() {
+            return orderMatches && amountMatches && keyMatches;
+        }
+    }
+
+    public TransactionMatch compareTransaction(String reportedOrderId, Money reportedAmount, String reportedKey) {
+        return new TransactionMatch(providerOrderId.equals(reportedOrderId), amount.equals(reportedAmount),
+            transactionKey == null || transactionKey.equals(reportedKey));
+    }
+
     public void switchProvider(String nextProviderId) {
         if (method != Method.PG || result != Result.PENDING || nextProviderId == null || nextProviderId.isBlank()) {
             throw new RuleViolationException("결제 대기 중인 PG 기록만 다음 PG로 전환할 수 있습니다.");

@@ -10,6 +10,29 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PaymentRecordTest {
+    @ParameterizedTest(name = "저장 키={0}, 주문={1}, 금액={2}, 조회 키={3}, 일치={4}")
+    @CsvSource(value = {
+        "null, LP-ORD-0000000042, 7000, TR-1, true",
+        "TR-1, LP-ORD-0000000042, 7000, TR-1, true",
+        "TR-1, OTHER, 7000, TR-1, false",
+        "TR-1, LP-ORD-0000000042, 6999, TR-1, false",
+        "TR-1, LP-ORD-0000000042, 7000, TR-2, false"
+    }, nullValues = "null")
+    @DisplayName("결제 기록이 조회 거래와 자신의 주문·금액·저장 키를 비교하며 상태는 변경하지 않는다")
+    void comparesTransactionWithoutChangingPayment(String storedKey, String orderId, long amount, String key, boolean matches) {
+        PaymentRecord payment = PaymentRecord.pgStarted(42, new Money(7000), ATTEMPT_KEY, "test-pg");
+        payment.applyProviderReport(PaymentRecord.ProviderStatus.PENDING, storedKey);
+
+        PaymentRecord.TransactionMatch match = payment.compareTransaction(orderId, new Money(amount), key);
+
+        assertThat(match.matches()).isEqualTo(matches);
+        assertThat(match.orderMatches()).isEqualTo(orderId.equals(payment.getProviderOrderId()));
+        assertThat(match.amountMatches()).isEqualTo(amount == 7000);
+        assertThat(match.keyMatches()).isEqualTo(storedKey == null || storedKey.equals(key));
+        assertThat(payment.getProviderStatus()).isEqualTo(PaymentRecord.ProviderStatus.PENDING);
+        assertThat(payment.getTransactionKey()).isEqualTo(storedKey);
+    }
+
     @Test
     @DisplayName("주문 7000원을 포인트로 결제하면 수단 POINT·결과 SUCCESS·결제액 7000원인 결제 기록이 된다")
     void recordsPointPayment() {

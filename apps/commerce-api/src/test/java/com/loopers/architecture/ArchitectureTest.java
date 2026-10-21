@@ -1,5 +1,6 @@
 package com.loopers.architecture;
 
+import com.loopers.application.order.PaymentLookupAssessment;
 import com.loopers.application.payment.PaymentGatewayRegistry;
 import com.loopers.application.payment.PaymentLookupPolicy;
 import com.loopers.application.payment.port.PaymentAnomalyRepository;
@@ -8,6 +9,7 @@ import com.loopers.application.payment.port.PaymentGateway;
 import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import com.loopers.domain.payment.LookupBackoff;
+import com.loopers.domain.payment.PaymentRecord;
 import com.loopers.infrastructure.payment.CircuitBreakingPaymentGateway;
 import com.loopers.infrastructure.payment.PaymentAnomalyJpaEntity;
 import com.loopers.infrastructure.payment.PaymentAnomalyPersistenceAdapter;
@@ -88,6 +90,7 @@ class ArchitectureTest {
         var infrastructure = CLASSES.that(resideInAPackage("..infrastructure.."));
 
         assertThat(application.contain(PaymentGateway.class)).isTrue();
+        assertThat(application.contain(PaymentLookupAssessment.class)).isTrue();
         assertThat(application.contain(PaymentCreateResult.Unknown.class)).isTrue();
         assertThat(application.contain(PaymentGatewayRegistry.class)).isTrue();
         assertThat(infrastructure.contain(TestPgPaymentGateway.class)).isTrue();
@@ -99,6 +102,7 @@ class ArchitectureTest {
         assertThat(application.contain(PaymentLookupPolicy.class)).isTrue();
         assertThat(application.contain(PaymentLookupScheduleRepository.class)).isTrue();
         assertThat(CLASSES.contain(LookupBackoff.class)).isTrue();
+        assertThat(CLASSES.contain(PaymentRecord.TransactionMatch.class)).isTrue();
         assertThat(infrastructure.contain(PaymentLookupScheduleJpaEntity.class)).isTrue();
         assertThat(infrastructure.contain(PaymentLookupScheduler.class)).isTrue();
         assertThat(infrastructure.contain(CircuitBreakingPaymentGateway.class)).isTrue();

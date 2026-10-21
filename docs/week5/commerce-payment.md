@@ -90,6 +90,7 @@ flowchart LR
 - Controller는 인바운드 어댑터다. 고객·관리자 Controller와 DTO를 구분하되 같은 도메인을 사용한다.
 - application은 Brand·Product·Like·Point·Order별 ApplicationService 하나로 시작한다. 공개 메서드가 입력 포트 역할을 하며 별도 UseCase 인터페이스·Facade·Command Handler는 두지 않는다. 입력·반환에 HTTP DTO를 사용하지 않는다.
 - Repository는 아웃바운드 포트이고, PersistenceAdapter가 이를 구현해 Spring Data JPA를 사용한다.
+- **결제 해석 책임 분리(2026-10-21 사용자 승인):** application의 순수 결과 객체 `PaymentLookupAssessment`가 PG 조회의 건수·보증 수준을 해석한다. 거래의 주문 ID·금액·저장 키 일치는 `PaymentRecord.compareTransaction`이 판단한다. 두 객체는 저장소·Spring·HTTP에 의존하지 않는다. 별도 ApplicationService·Facade는 추가하지 않는다.
 - 도메인별 어댑터로 시작한다. ProductPersistenceAdapter처럼 해당 도메인의 Repository를 구현해 조회·저장을 함께 처리한다. 전체 도메인을 통합하거나 메서드마다 어댑터를 나누지 않는다. 단순 모델 변환은 내부 메서드로 처리하고 Mapper 클래스를 일괄 추가하지 않는다.
 - 이름·설명까지 모두 VO로 만들거나 단순 규칙을 별도 도메인 서비스로 옮기지 않는다. 기존 경계를 유지하는 내부 리팩터링은 자율적으로 수행하고, 새 계층·입력 인터페이스 도입이나 서비스 책임 경계 변경은 이유와 영향을 설명하고 확인받는다.
 
@@ -774,6 +775,7 @@ flowchart LR
 - **재고 선점은 confirm 시점.** 선점 상태는 주문 상태로 표현한다: DRAFT=선점 없음, 결제 대기=확보, CONFIRMED=소비(추가 차감 없음), 결제 실패=반환. 결제 실패 전이와 재고 반환은 같은 트랜잭션이다. 부분 취소·여러 시도가 생기면 별도 예약 기록을 재검토한다.
 - **시도 키(`paymentAttemptKey`):** 프론트가 결제 화면 진입 시 한 번 만든 UUID이며 재시도 때 같은 키를 쓴다. 결제 기록에 유일 제약을 둔다. 같은 주문+같은 키=재시도(지금 상태 반환), 같은 주문+다른 키=거절, 같은 키+다른 주문·금액=거절. 키는 요청 식별용이고 1회 발송은 주문 상태 잠금이 지킨다.
 - **결과 반영(트랜잭션 B)은 하나의 경계로 모은다.** callback 본문은 신호일 뿐이고 PG 조회로 확인한다. 비관적 잠금: 주문 `FOR UPDATE` → Order 도메인이 판단 → 실패면 상품 ID 오름차순 잠금 후 반환. 잠금 순서는 confirm과 같다(10절의 잠금 후 판단 방식).
+- 결과 반영은 호출 목적(CREATE·CALLBACK·MANUAL·AUTOMATIC)을 명시해 전달한다. 확인 필요 해제는 기존처럼 MANUAL의 확정 보고만 허용하며 boolean 인자로 권한을 표현하지 않는다.
 
 - **트랜잭션 나누는 방식 (2026-10-21 사용자 승인):** confirm은 `@Transactional` 없이 조율만 한다. 트랜잭션 A와 결과 반영(트랜잭션 B)은 `OrderApplicationService` 안에서 `TransactionTemplate`으로 경계를 만든다. 같은 객체의 `@Transactional` 메서드를 부르면 프록시를 거치지 않아 경계가 생기지 않기 때문이다(9절). 결과 반영은 공개 메서드 하나(PG가 보고한 결과 하나를 받아 반영)로 두고, 3단계 reconcile·callback도 이 메서드를 쓴다. 이에 따라 `OrderApplicationService`의 클래스 단위 `@Transactional`(9절)은 메서드 단위 선언과 `TransactionTemplate`으로 바뀐다. 2절 서비스 구성은 유지한다.
 - **확인 경로:** 결제 대기 202 응답의 확인 경로는 주문 상세 `GET /api/v1/orders/{orderId}`다(새 API 없음).
@@ -819,6 +821,8 @@ flowchart LR
 - 조회 결과와 create 보고는 `OrderApplicationService`의 결과 반영 경계에서 공통 내부 반영 메서드를 재사용한다. 트랜잭션 하나, 주문 → 상품 ID 오름차순 잠금, PG 호출은 그 밖을 지킨다.
 
 ### 조회 결과 해석
+
+`PaymentLookupAssessment`는 조회 결과를 미호출·미확정·확인 필요·반영 가능한 보고로 해석하고, 저장 키 또는 검증된 일치 단일 거래 키를 callback 비교 근거로 제공한다. `OrderApplicationService`는 주문 잠금 아래 현재 결제 기록으로 이 해석을 수행한 뒤 기존 결과 반영·이상 기록·스케줄 저장을 조율한다. 해석 객체가 상태를 변경하거나 PG를 호출하지 않는다.
 
 | 결과 | 주문·결제 기록 | 이상 종류 |
 | --- | --- | --- |

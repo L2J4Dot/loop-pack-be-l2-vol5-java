@@ -1,6 +1,7 @@
 package com.loopers.application.order;
 
 import com.loopers.application.payment.port.PaymentCreateResult;
+import com.loopers.application.payment.port.PaymentTransaction;
 import com.loopers.domain.order.Order;
 import com.loopers.domain.payment.PaymentRecord;
 
@@ -14,16 +15,21 @@ public record PaymentReport(PaymentRecord.ProviderStatus status, String transact
 
     public static PaymentReport from(PaymentCreateResult result) {
         return switch (result) {
-            case PaymentCreateResult.Accepted accepted -> new PaymentReport(switch (accepted.transaction().status()) {
-                case PENDING -> PaymentRecord.ProviderStatus.PENDING;
-                case SUCCESS -> PaymentRecord.ProviderStatus.SUCCESS;
-                case FAILED -> PaymentRecord.ProviderStatus.FAILED;
-            }, accepted.transaction().transactionKey());
+            case PaymentCreateResult.Accepted accepted -> from(accepted.transaction());
             case PaymentCreateResult.RejectedNoEffect rejected ->
                 new PaymentReport(PaymentRecord.ProviderStatus.REJECTED_NO_EFFECT, null);
             case PaymentCreateResult.NotSent notSent -> new PaymentReport(PaymentRecord.ProviderStatus.NOT_SENT, null);
             case PaymentCreateResult.Unknown unknown -> new PaymentReport(PaymentRecord.ProviderStatus.UNKNOWN, null);
         };
+    }
+
+    public static PaymentReport from(PaymentTransaction transaction) {
+        PaymentRecord.ProviderStatus status = switch (transaction.status()) {
+            case PENDING -> PaymentRecord.ProviderStatus.PENDING;
+            case SUCCESS -> PaymentRecord.ProviderStatus.SUCCESS;
+            case FAILED -> PaymentRecord.ProviderStatus.FAILED;
+        };
+        return new PaymentReport(status, transaction.transactionKey());
     }
 
     Order.PaymentOutcome outcome() {
