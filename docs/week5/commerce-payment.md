@@ -701,7 +701,7 @@ Brand·Product·Like·Point·Order는 각각 애그리거트 루트다. 내부 �
 ```mermaid
 flowchart LR
     App["application<br/>(다음 단계의 결제 흐름)"] --> Registry["PaymentGatewayRegistry<br/>providerId → 포트, 우선순위 목록"]
-    Registry --> Port["PaymentGateway 포트<br/>create · findByTransactionKey · findByOrderId"]
+    Registry --> Port["PaymentGateway 포트<br/>create · verifyOrder"]
     AdapterA["test-pg 어댑터"] -->|구현| Port
     AdapterN["다른 PG 어댑터 …"] -->|구현| Port
     AdapterA -->|HTTP| PG[(테스트 PG)]
@@ -729,7 +729,7 @@ flowchart LR
 - `Unknown`에는 원인 요약을 담는다. 응답 본문·카드 번호는 담지 않는다.
 - **create 자동 재전송 금지.** 어댑터도 HTTP 클라이언트도 create를 다시 보내지 않는다(테스트 PG에 멱등 키가 없고, 같은 orderId 재POST를 중복 제거하지 않는다고 가정한다).
 
-**조회 결과는 사실만.** `findByTransactionKey`는 거래 / 없음(404) / 조회 실패, `findByOrderId`는 거래 목록(0건 가능) / 조회 실패를 돌려준다. 그 밖의 상태·timeout·깨진 응답은 조회 실패다. 0건·404를 "효과 없음"으로 해석하지 않는다(해석은 다음 단계).
+**조회 포트는 의도만 표현한다.** `verifyOrder(providerOrderId, storedTransactionKey)`는 이 주문의 거래 확인 요청이다. 저장된 거래 키는 없을 수 있다. 결과는 거래 목록 + 보증 수준(`ALL`: 해당 주문의 거래 전부 / `SINGLE`: 한 건만 확인) 또는 조회 실패다. 어댑터는 조회 방법을 선택하고 사실만 보고하며 애플리케이션이 24절에 따라 해석한다. test-pg는 주문 ID 목록 조회를 사용해 `ALL`로 보고하고 기존 키·주문 ID 조회는 어댑터 내부로 옮긴다. 5xx·timeout·깨진 JSON·연결 실패는 조회 실패다. 0건·404는 효과 없음의 증거가 아니다.
 
 **테스트 PG 계약 (과제 제공).**
 
@@ -798,4 +798,39 @@ flowchart LR
 - 모든 PG가 미발송이면 결과 반영 경계에서 `ALL_NOT_SENT`로 결제 실패·재고 반환 1회 처리한다. PG가 하나면 그 PG 미발송 즉시 실패다.
 - 시도한 providerId와 결과 분류는 INFO 로그에 남긴다. 카드 번호·응답 원문은 남기지 않는다.
 
-- **미결(2b 이후 결정):** 조회 결과 해석(404·빈 목록·복수 건), 충돌·이상 기록 방식, timeout 수치, 재조회 스케줄·서킷 브레이커.
+- **조회 해석·충돌·이상 기록:** 24절을 따른다. 남은 미결은 timeout 수치, 재조회 스케줄·서킷 브레이커다.
+
+
+## 24. 결과 확정 경로: callback·reconcile·이상 기록 [확정]
+
+### 입력 경로와 경계
+
+- callback: `POST /api/v1/payments/callback`, 본문 `{transactionKey, orderId, amount, status}`. 본문은 신호일 뿐 status·금액·키를 결제 결과에 반영하지 않는다. providerOrderId로 결제 기록을 찾고 저장된 providerId·providerOrderId·거래 키로 PG를 조회한다.
+- 처리 순서: 결제 기록 찾기 → 트랜잭션 밖·잠금 없이 PG 조회 → 결과 반영 경계. 확인 필요(`NEEDS_REVIEW`) 기록은 callback 조회에서 제외한다(D41).
+- callback 키와 저장 키가 다르면 `CALLBACK_KEY_MISMATCH` 이상만 기록하고 확인 필요로 바꾸지 않는다. 저장 키가 없어도 비교한다. 조회는 그대로 진행한다.
+- callback은 형식이 맞으면 조회 성공·실패와 무관하게 200. 모르는 orderId는 200 + WARN, 이상 테이블에는 쓰지 않는다. 본문 형식 오류는 400.
+- 관리자: `POST /api-admin/v1/orders/{orderId}/payment/reconcile`. 기존 관리자 보안 경계를 사용한다. 저장된 값으로 조회 → 결과 반영 경계이며 확인 필요도 처리한다. 응답은 관리자 주문 조회와 같은 모양 200, 없는 주문 404, PG 결제가 아닌 주문 409.
+- 조회 결과와 create 보고는 `OrderApplicationService`의 결과 반영 경계에서 공통 내부 반영 메서드를 재사용한다. 트랜잭션 하나, 주문 → 상품 ID 오름차순 잠금, PG 호출은 그 밖을 지킨다.
+
+### 조회 결과 해석
+
+| 결과 | 주문·결제 기록 | 이상 종류 |
+| --- | --- | --- |
+| 조회 실패 | 결제 대기·PG 상태 유지 | `LOOKUP_FAILED` (일시적) |
+| 0건 | 결제 대기·PG 상태 유지. 저장 키 존재 여부도 요약에 기록 | `NO_TRANSACTION` (일시적) |
+| 1건, 주문 ID·금액·저장 키(있다면) 일치 | PENDING: 유지·키 저장 / SUCCESS: CONFIRMED / FAILED: 결제 실패·재고 반환 1회 | 없음 |
+| 1건 불일치 | 결제 대기·`NEEDS_REVIEW`, 거래 키 유지 | `TRANSACTION_MISMATCH` (영구적) |
+| 2건 이상, 보증 ALL | 결제 대기·`NEEDS_REVIEW`, 거래 키 유지 | `DUPLICATE_TRANSACTIONS` (영구적) |
+
+보증 SINGLE은 그 주문 거래 전부를 확인한 것이 아니므로 중복 여부를 판단하지 않는다. 종결 주문에 반대 결과는 상태를 덮어쓰지 않고 `CONFLICTING_RESULT`(영구적), DRAFT에 결과는 변화 없이 `RESULT_BEFORE_PAYMENT`(영구적)로 기록하며 WARN 로그도 유지한다.
+
+확인 필요는 주문 상태가 아니라 결제 기록 PG 상태다. PENDING·결과 모름·조회 실패는 확인 필요를 지우지 않는다. **수동 reconcile이 일치하는 확정 성공·실패를 얻었을 때만** 확인 필요에서 벗어난다. callback 키 불일치 이상은 영구적이며 자동 해결하지 않는다.
+
+### 이상 기록
+
+- `payment_anomalies`: 주문 ID(`order_id`), 종류(`kind`), 처음 시각(`first_seen_at`), 마지막 시각(`last_seen_at`), 횟수(`occurrences`), 마지막 PG 값 요약(`last_summary`), 해결 시각(`resolved_at`), 내부 ID. `(order_id, kind)` 유일 제약.
+- 결과 반영 트랜잭션 안, 주문 FOR UPDATE 잠금 아래 없으면 INSERT, 있으면 횟수·마지막 시각·요약을 갱신한다. 해결된 종류가 재발하면 해결 시각을 비우고 횟수를 올린다.
+- 주문이 CONFIRMED·결제 실패로 종결되는 경계에서 미해결 일시적 이상만 해결한다. 영구적 이상은 자동 해결하지 않는다.
+- 시각은 주입한 `Clock`을 사용한다. PG 요약에는 카드 번호·원문 응답을 담지 않고 상태·건수·일치 여부만 담는다.
+
+스케줄러·자동 재조회·backoff·서킷 브레이커·이상 해결 API·주문 결제 열 삭제·토스 어댑터는 범위 밖이다.
