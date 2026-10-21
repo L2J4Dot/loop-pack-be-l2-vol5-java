@@ -218,6 +218,8 @@ Brand·Product·Like·Point·Order는 각각 애그리거트 루트다. 내부 �
 
 ### 포인트 충전 → 주문 확정
 
+아래는 3주차 기록이다. **5주차부터 주문 확정은 23절로 대체한다:** 트랜잭션 A에서 재고 확보·결제 대기를 저장하고 commit → 트랜잭션 밖 PG 호출 → 트랜잭션 B에서 결과 반영. 포인트는 차감하지 않으며 10,000원 충전 후 7,000원 PG 결제에도 잔액은 10,000원이다.
+
 1. 요청자의 Point를 조회하고 충전 후 잔액을 저장한다.
 2. 상품·수량을 확인하고 품목·단가·합계를 가진 DRAFT 주문을 저장한다. 생성 시 차감하지 않는다.
 3. 최초 확정은 본인의 DRAFT 주문에 대해서만 수행하며 상품 사용 가능 여부·재고·잔액을 확인한다. 이미 CONFIRMED인 주문의 재요청은 409로 거절한다.
@@ -269,7 +271,7 @@ Brand·Product·Like·Point·Order는 각각 애그리거트 루트다. 내부 �
 | POST | `/api/v1/points/charge` | 요청자·양의 정수 amount | 충전 후 저장된 잔액 | 누락·타입·0 이하·합산 범위 초과 |
 | GET | `/api/v1/points` | 요청자 | 자신의 저장된 잔액 | 식별 오류 |
 | POST | `/api/v1/orders` | 상품 ID·수량 목록 | 품목·단가·합계·DRAFT 상태 저장 | 상품 없음·삭제됨, 양수가 아닌 수량 |
-| POST | `/api/v1/orders/{orderId}/confirm` | 요청자·주문 ID | CONFIRMED·결제액·결제 결과 저장 | 타인 주문, 상품 사용 불가, 재고·잔액 부족; 재확정 409 |
+| POST | `/api/v1/orders/{orderId}/confirm` | 요청자·주문 ID·paymentAttemptKey·카드 정보(23절) | 트랜잭션 A → PG → 결과 반영, 결제 대기 202·종결 200, 포인트 미차감 | 타인 주문 404, 상품 사용 불가·재고 부족, 다른 시도 키 409(23절) |
 | GET | `/api/v1/orders` | 요청자·조회 조건 | 내 주문 목록 | 식별·조회 입력 오류 |
 | GET | `/api/v1/orders/{orderId}` | 요청자·주문 ID | 내 주문 품목·금액·상태·결제 결과 | 주문 없음·타인 접근 |
 
@@ -378,6 +380,8 @@ Brand·Product·Like·Point·Order는 각각 애그리거트 루트다. 내부 �
 
 ## 9. 트랜잭션 경계
 
+아래 주문 확정 경계는 3주차 기록이다. **5주차부터 주문 확정은 23절로 대체한다.** `OrderApplicationService.confirm`은 트랜잭션 없이 조율하고, `TransactionTemplate`으로 트랜잭션 A → 외부 PG 호출 → 결과 반영 트랜잭션 B를 분리한다. 포인트는 차감하지 않는다. B 예외는 rollback 완료 후 confirm에서 처리한다.
+
 - **시작점:** Controller가 호출하는 ApplicationService 공개 메서드다. 서비스는 Spring bean으로 주입되어 호출이 프록시를 거친다. 같은 객체의 다른 `@Transactional` 메서드를 호출해 경계를 만들지 않는다.
 - **선언:** `Order`·`Product`·`PointApplicationService`는 클래스 단위, `BrandApplicationService`는 변경 메서드 단위 `@Transactional`이다. 영속 어댑터에도 선언이 있지만 전파가 REQUIRED라 서비스 트랜잭션에 참여한다. 어댑터를 서비스 밖에서 직접 호출하면 저장마다 따로 commit되므로 변경은 항상 서비스 메서드에서 시작한다. `REQUIRES_NEW`·`NESTED`는 부분 commit을 만들므로 쓰지 않는다.
 - **rollback:** 업무 예외(`RuleViolationException`·`InvalidValueException`·`*NotFoundException`)와 잠금 실패 예외는 모두 RuntimeException이다. 서비스 안에서 catch 후 정상 반환하지 않고 밖으로 전달해 전체를 rollback한다.
@@ -452,6 +456,8 @@ Brand·Product·Like·Point·Order는 각각 애그리거트 루트다. 내부 �
 - 삭제 후에는 기존 `deleted` 검사가 그대로 적용된다. 고객 목록·상세와 내 좋아요 목록에서 제외, 새 좋아요·새 주문·확정 거절(삭제 전에 만든 DRAFT 포함, 404), 관리자 수정·재고 변경 거절. 자기 좋아요 취소는 유지한다.
 
 ## 12. 최초 주문 확정과 오류 분류
+
+아래 포인트 확정은 3주차 기록이다. **5주차부터 23절로 대체한다:** 트랜잭션 A → PG → 결과 반영이며 포인트 미차감, 같은 시도 키는 현재 결과 반환이다. 트랜잭션 A 오류는 기존 오류 계약을 유지하고, PG 호출 이후 트랜잭션 B 저장 실패 응답은 결제 대기 202다.
 
 `POST /api/v1/orders/{orderId}/confirm`의 2주차 구현을 유지하고 중간 실패·경쟁을 검증한다.
 
@@ -783,4 +789,5 @@ flowchart LR
 
 - "결과: 실패"는 PG `FAILED`와 효과 없는 거절(21절)을 포함한다. "결과: 모름"은 `PENDING`·결과 모름·조회 실패다.
 - **confirm 응답:** 결제 대기 202 + 상태 + 확인 경로 / 종결(CONFIRMED·결제 실패) 200 + 결과 / 다른 키·키 재사용 409 / 재고 부족·삭제 상품(PG 0회) 기존 409·404 / 타인·없는 주문 404 / 잠금 대기 초과 503. HTTP 코드는 요청 처리 결과, 결제 결과는 본문이다.
+- **PG 호출 이후 트랜잭션 B 저장 실패:** rollback 후 주문을 새로 읽어 결제 대기 202 + 확인 경로를 반환한다. 주문 ID·PG 상태를 ERROR 로그에 남기며 카드 번호·예외 원문은 남기지 않는다. 트랜잭션 A 실패는 기존 오류 응답이다.
 - **미결(2b 이후 결정):** 조회 결과 해석(404·빈 목록·복수 건), 충돌·이상 기록 방식, 서브 PG 전환, 모든 PG 미발송 시 처리, timeout 수치, 재조회 스케줄·서킷 브레이커.
