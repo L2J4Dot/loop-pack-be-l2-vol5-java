@@ -83,7 +83,8 @@ class OrderPaymentApiIntegrationTest {
             .andExpect(status().isAccepted())
             .andExpect(jsonPath("$.data.id").value(orderId))
             .andExpect(jsonPath("$.data.status").value("PAYMENT_PENDING"))
-            .andExpect(jsonPath("$.data.statusUrl").value("/api/v1/orders/" + orderId));
+            .andExpect(jsonPath("$.data.statusUrl").value("/api/v1/orders/" + orderId))
+            .andExpect(jsonPath("$.data.providerStatus").value("PENDING"));
 
         assertScene("PAYMENT_PENDING", 3, 4, "PENDING", "PENDING", 1, 1);
         assertThat(record().get("transaction_key")).isEqualTo(server.transactions().get(0).transactionKey());

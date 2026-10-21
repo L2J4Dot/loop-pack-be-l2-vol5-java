@@ -93,6 +93,9 @@ class PaymentLookupCircuitIntegrationTest {
         mvc.perform(post(reconcilePath()).with(csrf()).with(user("admin").roles("ADMIN")))
             .andExpect(status().isServiceUnavailable())
             .andExpect(jsonPath("$.meta.errorCode").value("Service Unavailable"));
+        mvc.perform(post("/api/v1/orders/{id}/payment/reconcile", orderId).header("X-USER-ID", "1"))
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.meta.errorCode").value("Service Unavailable"));
 
         scene(3, 1, 10, 5);
         assertThat(schedules.findByOrderId(orderId)).contains(beforeSchedule);

@@ -1,5 +1,6 @@
 package com.loopers.interfaces.api.payment;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.loopers.application.order.OrderApplicationService;
 import com.loopers.interfaces.api.ApiResponse;
@@ -8,7 +9,6 @@ import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -25,16 +25,16 @@ public class PaymentCallbackController {
         this.orderApplicationService = orderApplicationService;
     }
 
-    public record CallbackRequest(@NotBlank String transactionKey, @NotBlank String orderId,
-        @NotNull JsonNode amount, @NotBlank String status) {
+    public record CallbackRequest(@NotBlank String transactionKey,
+        @JsonAlias("orderId") @NotBlank String providerOrderId, JsonNode amount, @NotBlank String status) {
     }
 
     @PostMapping("/api/v1/payments/callback")
     public ApiResponse<Void> callback(@Valid @RequestBody CallbackRequest request) {
-        if (RequestValues.integer(request.amount()) < 0) {
+        if (request.amount() != null && RequestValues.integer(request.amount()) < 0) {
             throw new CoreException(ErrorType.BAD_REQUEST);
         }
-        orderApplicationService.receivePaymentCallback(request.orderId(), request.transactionKey());
+        orderApplicationService.receivePaymentCallback(request.providerOrderId(), request.transactionKey());
         return ApiResponse.success(null);
     }
 

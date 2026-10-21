@@ -811,7 +811,7 @@ flowchart LR
 - 고객의 명시적 reconcile도 수동 확인 경로이며 일치하는 확정 결과로 확인 필요를 해제할 수 있다. 관리자 미완료 200·실제 PG 실패 200·회로 미호출 503의 기존 확장 계약은 유지한다.
 
 
-- callback: `POST /api/v1/payments/callback`, 본문 `{transactionKey, orderId, amount, status}`. 본문은 신호일 뿐 status·금액·키를 결제 결과에 반영하지 않는다. providerOrderId로 결제 기록을 찾고 저장된 providerId·providerOrderId·거래 키로 PG를 조회한다.
+- callback: `POST /api/v1/payments/callback`, 과제 본문 `{providerOrderId, transactionKey, status}`. 기존 `orderId` 이름은 providerOrderId의 별칭으로 계속 받으며 `amount`는 선택 입력(있으면 기존 숫자·0 이상 검증 유지)이다. 본문은 신호일 뿐 status·금액·키를 결제 결과에 반영하지 않는다. providerOrderId로 결제 기록을 찾고 저장된 providerId·providerOrderId·거래 키로 PG를 조회한다.
 - 처리 순서: 결제 기록 찾기 → 트랜잭션 밖·잠금 없이 PG 조회 → 결과 반영 경계. 확인 필요(`NEEDS_REVIEW`) 기록은 callback 조회에서 제외한다(D41).
 - callback 키는 저장된 거래 키가 있으면 그 키와 비교한다. 저장 키가 없으면 조회 결과가 정확히 1건이고 주문 ID·금액이 일치할 때 그 거래 키와 비교한다. 비교 대상이 없으면(조회 실패·0건·2건 이상·불일치) 키 불일치 이상을 기록하지 않는다. 다르면 `CALLBACK_KEY_MISMATCH`(영구적)만 기록하고 확인 필요로 바꾸지 않으며 조회 결과 반영은 그대로 진행한다.
 - callback은 형식이 맞으면 조회 성공·실패와 무관하게 200. 모르는 orderId는 200 + WARN, 이상 테이블에는 쓰지 않는다. 본문 형식 오류는 400.

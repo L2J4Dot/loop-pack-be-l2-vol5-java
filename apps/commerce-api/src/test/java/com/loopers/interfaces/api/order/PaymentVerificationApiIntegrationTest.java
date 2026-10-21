@@ -154,6 +154,21 @@ class PaymentVerificationApiIntegrationTest {
     }
 
     @Test
+    @DisplayName("과제 형식의 providerOrderId callback은 금액 없이 권위 조회하고 본문 성공만으로 확정하지 않는다")
+    void acceptsQuestCallbackContract() throws Exception {
+        start(CreateBehavior.ACCEPT_PENDING);
+        String body = "{\"providerOrderId\":\"" + providerOrderId() + "\",\"transactionKey\":\""
+            + transactionKey() + "\",\"status\":\"SUCCESS\"}";
+        mvc.perform(post("/api/v1/payments/callback").contentType(MediaType.APPLICATION_JSON).content(body))
+            .andExpect(status().isOk());
+        scene("PAYMENT_PENDING", 3, "PENDING", 1, 1, 1);
+        server.changeStatus(transactionKey(), "SUCCESS");
+        mvc.perform(post("/api/v1/payments/callback").contentType(MediaType.APPLICATION_JSON).content(body))
+            .andExpect(status().isOk());
+        scene("CONFIRMED", 3, "SUCCESS", 1, 1, 2);
+    }
+
+    @Test
     @DisplayName("키 없는 응답 유실 뒤 PG 성공 callback은 조회로 확정하고 재고 추가 차감과 create 재발송이 없다")
     void confirmsLostResponseByCallback() throws Exception {
         start(CreateBehavior.DELAY_AFTER_CREATE);
