@@ -729,7 +729,7 @@ flowchart LR
 - `Unknown`에는 원인 요약을 담는다. 응답 본문·카드 번호는 담지 않는다.
 - **create 자동 재전송 금지.** 어댑터도 HTTP 클라이언트도 create를 다시 보내지 않는다(테스트 PG에 멱등 키가 없고, 같은 orderId 재POST를 중복 제거하지 않는다고 가정한다).
 
-**조회 포트는 의도만 표현한다.** `verifyOrder(providerOrderId, storedTransactionKey)`는 이 주문의 거래 확인 요청이다. 저장된 거래 키는 없을 수 있다. 결과는 거래 목록 + 보증 수준(`ALL`: 해당 주문의 거래 전부 / `SINGLE`: 한 건만 확인) 또는 조회 실패다. 어댑터는 조회 방법을 선택하고 사실만 보고하며 애플리케이션이 24절에 따라 해석한다. test-pg는 주문 ID 목록 조회를 사용해 `ALL`로 보고하고 기존 키·주문 ID 조회는 어댑터 내부로 옮긴다. 5xx·timeout·깨진 JSON·연결 실패는 조회 실패다. 0건·404는 효과 없음의 증거가 아니다.
+**조회 포트는 의도만 표현한다.** `verifyOrder(providerOrderId, storedTransactionKey)`는 이 주문의 거래 확인 요청이다. 저장된 거래 키는 없을 수 있다. 결과는 거래 목록 + 보증 수준(`ALL`: 해당 주문의 거래 전부 / `SINGLE`: 한 건만 확인) 또는 조회 실패·호출 안 함(`NotCalled`)이다. 어댑터는 조회 방법을 선택하고 사실만 보고하며 애플리케이션이 24절에 따라 해석한다. test-pg는 주문 ID 목록 조회를 사용해 `ALL`로 보고하고 기존 키·주문 ID 조회는 어댑터 내부로 옮긴다. 5xx·timeout·깨진 JSON·연결 실패는 조회 실패다. 0건·404는 효과 없음의 증거가 아니다.
 
 **테스트 PG 계약 (과제 제공).**
 
@@ -817,6 +817,7 @@ flowchart LR
 | 결과 | 주문·결제 기록 | 이상 종류 |
 | --- | --- | --- |
 | 조회 실패 | 결제 대기·PG 상태 유지 | `LOOKUP_FAILED` (일시적) |
+| 호출 안 함 `NotCalled` | 주문·PG 상태 유지, 로그만. callback 200, 자동 조회 횟수 미집계·다음 시각만 연기 | 없음 |
 | 0건 | 결제 대기·PG 상태 유지. 저장 키 존재 여부도 요약에 기록 | `NO_TRANSACTION` (일시적) |
 | 1건, 주문 ID·금액·저장 키(있다면) 일치 | PENDING: 유지·키 저장 / SUCCESS: CONFIRMED / FAILED: 결제 실패·재고 반환 1회 | 없음 |
 | 1건 불일치 | 결제 대기·`NEEDS_REVIEW`, 거래 키 유지 | `TRANSACTION_MISMATCH` (영구적) |
@@ -838,9 +839,43 @@ test-pg 어댑터는 조회 응답의 다른 orderId 거래도 걸러내지 않�
 - 주문이 CONFIRMED·결제 실패로 종결되는 경계에서 미해결 일시적 이상만 해결한다. 영구적 이상은 자동 해결하지 않는다.
 - 시각은 주입한 `Clock`을 사용한다. PG 요약에는 카드 번호·원문 응답을 담지 않고 상태·건수·일치 여부만 담는다.
 
-스케줄러·자동 재조회·backoff·서킷 브레이커·이상 해결 API·주문 결제 열 삭제·토스 어댑터는 범위 밖이다.
+스케줄러·자동 재조회·backoff·조회 서킷 브레이커는 25절을 따른다. 이상 해결 API·주문 결제 열 삭제·토스 어댑터는 범위 밖이다.
 
 
 ### 한계
 
-모든 PG 미발송 뒤 트랜잭션 B 저장이 실패하거나 서브 PG 전환 저장이 실패하면, "모든 PG 미발송" 사실이 남지 않아 결제 실패로 확정할 수 없다. 결제 대기 → 재조회 0건 → 4단계 한도 후 확인 필요로 간다. 이중 결제는 없고 재고만 묶인다. 4단계 한도 처리는 이번 구현 범위가 아니다.
+모든 PG 미발송 뒤 트랜잭션 B 저장이 실패하거나 서브 PG 전환 저장이 실패하면, "모든 PG 미발송" 사실이 남지 않아 결제 실패로 확정할 수 없다. 결제 대기 → 재조회 0건 → 4단계 한도 후 확인 필요로 간다. 이중 결제는 없고 재고만 묶인다. 4단계 한도 처리는 25절을 따른다.
+
+
+## 25. 결과 모름의 자동 재조회와 서킷 브레이커 [확정, 수치는 임시]
+
+### 재조회 상태와 결과 반영
+
+- `payment_lookup_schedules`: `order_id`(주문 ID·기본 키·유일), `next_lookup_at`(다음 조회), `actual_attempts`(PG에 실제로 물어본 횟수), `created_at`·`updated_at`(생성·갱신 시각).
+- 트랜잭션 A에서 결제 대기 전이와 같은 트랜잭션으로 행을 만든다. 첫 시각은 주입 Clock의 지금 + 첫 간격에 full jitter를 적용한 값이다. create 전 중단돼도 재조회 대상에 남는다.
+- 결과 반영 경계의 주문 잠금 아래 CONFIRMED·결제 실패 종결 또는 NEEDS_REVIEW가 되면 스케줄을 삭제한다. create 응답·callback·수동 reconcile·자동 재조회 모두 같은 경계를 사용한다.
+- 자동 경로는 callback과 같이 NEEDS_REVIEW를 조회하지 않는다. 현재 결제 기록 providerId로 트랜잭션 밖에서 PG를 조회하고 기존 검증·결과 반영 경계에 넣는다. 자동 경로는 callback 키 비교를 하지 않는다.
+- 같은 결과 반영 트랜잭션·주문 잠금 아래 실제 조회 횟수 +1 후 미확정이면 다음 시각을 갱신한다. NotCalled는 횟수·이상 기록을 늘리지 않고 다음 시각만 미룬다.
+- 실제 조회 12회 한도에서 여전히 결제 대기면 NEEDS_REVIEW + 영구 이상 `LOOKUP_LIMIT_EXHAUSTED` + 스케줄 삭제로 전환한다. 실패로 확정하거나 재고를 반환하지 않는다(D42).
+
+### 간격과 실행 설정 [임시]
+
+- `payment.lookup.initial-delay=5s`, `payment.lookup.multiplier=2`, `payment.lookup.max-delay=1m`, `payment.lookup.max-attempts=12`.
+- 명목 간격은 5→10→20→40→60→60초이며 full jitter는 0~명목 간격 사이에서 선택한다. 무작위 선택은 주입 가능하게 하고, Clock은 기존 주입 Clock을 쓴다.
+- 바꿀 신호: 한도 소진 건수, 결제 대기 체류 시간 p99, PG 장애 지속 시간. 명목 합 약 9분이며 full jitter 평균은 그 절반 정도다.
+- `payment.lookup.scheduler.enabled=true`, `payment.lookup.scheduler.fixed-delay=1s`, `payment.lookup.batch-size=100`. 테스트 프로필에서는 스케줄 실행을 끄고 한 번 실행 메서드를 직접 호출한다.
+- @Scheduled 고정 지연으로 다음 시각 ≤ 지금인 행을 다음 시각·주문 ID 순으로 최대 batch-size건 읽는다. 주문 하나의 예외는 잡아 로그에 남기고 다음 주문을 계속 처리한다.
+
+### PG별 조회 서킷 브레이커 [임시]
+
+- `resilience4j-circuitbreaker:2.4.0`을 직접 사용한다. Spring Boot 3.4.4·Java 21을 유지하며 Boot 자동 설정 스타터는 추가하지 않는다.
+- infrastructure에서 PG 어댑터를 감싼다. providerId별 별도 회로이며 verifyOrder만 적용하고 create는 그대로 전달한다. application·domain은 Resilience4j에 의존하지 않는다.
+- `payment.lookup.circuit.sliding-window-size=20`, `minimum-number-of-calls=10`, `failure-rate-threshold=50`, `open-duration=30s`, `half-open-calls=3`. 횟수 기반, 열림→반열림 자동 전환은 끄고 기존 Clock을 주입한다.
+- 조회 Failed(5xx·timeout·연결 실패·깨진 응답)는 실패 표본, 거래 있음·0건 Found는 성공 표본이다(D45). 회로가 호출을 거절하면 포트의 NotCalled로 보고한다.
+- NotCalled: callback은 200 + 로그, 자동 경로는 횟수·이상 기록 없이 다음 시각만 연기한다. 관리자 reconcile의 미호출 응답 계약은 별도 승인 요청 중이며 승인 후 기록·구현한다.
+
+### 한계
+
+서버 한 대를 가정한다. 여러 대면 동일 주문을 중복 조회할 수 있지만 조회에는 외부 효과가 없고 반영은 주문 잠금으로 직렬화되므로 정확성 문제는 아니고 낭비다. 다중 서버가 되면 FOR UPDATE SKIP LOCKED 선점 또는 ShedLock을 검토한다.
+
+PG 장애로 회로가 계속 열리면 한도가 줄지 않아 결제 대기가 길어질 수 있다. callback·수동 reconcile 경로는 남아 있다. 다중 서버 선점·timeout 수치 변경·create 회로·이상 해결 API·주문 결제 열 삭제·토스 어댑터는 범위 밖이다.
