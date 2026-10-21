@@ -355,7 +355,7 @@ class TestPgPaymentGatewayTest {
         void returnsEmptyList() {
             PaymentTransactionsLookup result = gateway.findByOrderId(ORDER_ID);
 
-            assertThat(result).isEqualTo(new PaymentTransactionsLookup.Found(List.of()));
+            assertThat(result).isEqualTo(new PaymentTransactionsLookup.Found(List.of(), PaymentTransactionsLookup.Coverage.ALL));
         }
 
         @Test
@@ -369,7 +369,8 @@ class TestPgPaymentGatewayTest {
 
             assertThat(result).isEqualTo(new PaymentTransactionsLookup.Found(List.of(
                 new PaymentTransaction(first, ORDER_ID, new Money(AMOUNT), PaymentTransactionStatus.FAILED),
-                new PaymentTransaction(second, ORDER_ID, new Money(AMOUNT), PaymentTransactionStatus.PENDING))));
+                new PaymentTransaction(second, ORDER_ID, new Money(AMOUNT), PaymentTransactionStatus.PENDING)),
+                PaymentTransactionsLookup.Coverage.ALL));
         }
 
         static Stream<Arguments> failures() {

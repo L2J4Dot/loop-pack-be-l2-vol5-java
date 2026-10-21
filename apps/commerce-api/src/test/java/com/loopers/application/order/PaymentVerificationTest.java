@@ -23,6 +23,8 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
@@ -80,6 +82,26 @@ class PaymentVerificationTest {
         assertThat(order.getStatus()).isEqualTo(Order.Status.CONFIRMED);
         verifyNoInteractions(products);
         verify(anomalies).resolveTransient(42, Instant.EPOCH);
+        verifyNoMoreInteractions(anomalies);
+    }
+
+    @ParameterizedTest(name = "보증={0}, 이상={1}")
+    @CsvSource({"SINGLE, COVERAGE_CONTRACT_VIOLATION", "ALL, DUPLICATE_TRANSACTIONS"})
+    @DisplayName("거래 2건은 보증별 영구 이상 한 건을 기록하고 확인 필요·결제 대기·기존 키·재고를 유지한다")
+    void quarantinesMultipleTransactionsByCoverage(PaymentTransactionsLookup.Coverage coverage,
+        PaymentAnomalyRepository.Kind expectedKind) {
+        when(gateway.verifyOrder(payment.getProviderOrderId(), null)).thenReturn(new PaymentTransactionsLookup.Found(
+            List.of(new PaymentTransaction("TR-1", payment.getProviderOrderId(), new Money(2000), PaymentTransactionStatus.SUCCESS),
+                new PaymentTransaction("TR-2", payment.getProviderOrderId(), new Money(2000), PaymentTransactionStatus.FAILED)), coverage));
+
+        assertThat(service.reconcilePayment(42).status()).isEqualTo("PAYMENT_PENDING");
+
+        assertThat(order.getStatus()).isEqualTo(Order.Status.PAYMENT_PENDING);
+        assertThat(payment.getResult()).isEqualTo(PaymentRecord.Result.PENDING);
+        assertThat(payment.getProviderStatus()).isEqualTo(PaymentRecord.ProviderStatus.NEEDS_REVIEW);
+        assertThat(payment.getTransactionKey()).isNull();
+        verifyNoInteractions(products);
+        verify(anomalies).record(42, expectedKind, "count=2", Instant.EPOCH);
         verifyNoMoreInteractions(anomalies);
     }
 

@@ -197,6 +197,9 @@ public class OrderApplicationService {
             if (found.coverage() == PaymentTransactionsLookup.Coverage.ALL && transactions.size() > 1) {
                 return requireReview(order, payment, Kind.DUPLICATE_TRANSACTIONS, "count=" + transactions.size());
             }
+            if (found.coverage() == PaymentTransactionsLookup.Coverage.SINGLE && transactions.size() > 1) {
+                return requireReview(order, payment, Kind.COVERAGE_CONTRACT_VIOLATION, "count=" + transactions.size());
+            }
             PaymentTransaction transaction = transactions.get(0);
             boolean orderMatches = payment.getProviderOrderId().equals(transaction.providerOrderId());
             boolean amountMatches = payment.getAmount().equals(transaction.amount());

@@ -7,10 +7,6 @@ public sealed interface PaymentTransactionsLookup {
     enum Coverage { ALL, SINGLE }
 
     record Found(List<PaymentTransaction> transactions, Coverage coverage) implements PaymentTransactionsLookup {
-        public Found(List<PaymentTransaction> transactions) {
-            this(transactions, Coverage.ALL);
-        }
-
         public Found {
             transactions = List.copyOf(transactions);
         }

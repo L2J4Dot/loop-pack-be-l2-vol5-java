@@ -146,7 +146,8 @@ public class TestPgPaymentGateway implements PaymentGateway {
                     }
                     return readTree(response.getBody().readAllBytes())
                         .flatMap(this::toTransactions)
-                        .<PaymentTransactionsLookup>map(PaymentTransactionsLookup.Found::new)
+                        .<PaymentTransactionsLookup>map(transactions -> new PaymentTransactionsLookup.Found(
+                            transactions, PaymentTransactionsLookup.Coverage.ALL))
                         .orElseGet(() -> listFailed("응답 형식 오류"));
                 });
         } catch (RestClientException e) {
