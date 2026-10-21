@@ -3,7 +3,9 @@ package com.loopers.application.order;
 import com.loopers.application.brand.BrandApplicationService;
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.PaymentLookupPolicy;
 import com.loopers.application.payment.port.PaymentAnomalyRepository;
+import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
 import com.loopers.application.payment.port.PaymentRecordRepository;
 import com.loopers.application.point.PointApplicationService;
 import com.loopers.application.product.ProductApplicationService;
@@ -67,6 +69,12 @@ class OrderTransactionTest {
 
     @Autowired
     private Clock clock;
+
+    @Autowired
+    private PaymentLookupPolicy paymentLookupPolicy;
+
+    @Autowired
+    private PaymentLookupScheduleRepository paymentLookupScheduleRepository;
 
     @Autowired
     private BrandApplicationService brandApplicationService;
@@ -213,7 +221,7 @@ class OrderTransactionTest {
         OrderApplicationService restarted = new OrderApplicationService(failingOrderRepository, productRepository,
             failingPaymentRecordRepository,
             new PaymentGatewayRegistry(List.of(testPgFixture.newClient()), List.of(TestPgFixture.PROVIDER_ID)),
-            transactionTemplate, paymentAnomalyRepository, clock);
+            transactionTemplate, paymentAnomalyRepository, clock, paymentLookupScheduleRepository, paymentLookupPolicy);
         OrderResult afterRestart = restarted.confirm(1, orderId, TestPgFixture.command(attemptKey));
 
         assertThat(afterRestart.status()).isEqualTo("PAYMENT_PENDING");
@@ -221,6 +229,10 @@ class OrderTransactionTest {
         assertState("PAYMENT_PENDING", 3, 4, 0);
         assertThat(paymentRecord()).containsEntry("provider_status", "SEND_STARTED");
         assertThat(server.transactions()).isEmpty();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from payment_lookup_schedules where order_id = ?",
+            Long.class, orderId)).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject("select actual_attempts from payment_lookup_schedules where order_id = ?",
+            Integer.class, orderId)).isZero();
     }
 
     private void assertState(String orderStatus, int firstStock, int secondStock, long createCalls) {

@@ -2,11 +2,14 @@ package com.loopers.application.order;
 
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.PaymentLookupPolicy;
 import com.loopers.application.payment.port.PaymentAnomalyRepository;
 import com.loopers.application.payment.port.PaymentAnomalyRepository.Kind;
 import com.loopers.application.payment.port.PaymentCreateCommand;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
+import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
+import com.loopers.application.payment.port.PaymentLookupScheduleRepository.Schedule;
 import com.loopers.application.payment.port.PaymentRecordRepository;
 import com.loopers.application.payment.port.PaymentTransaction;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
@@ -21,6 +24,7 @@ import com.loopers.domain.payment.PaymentRecord;
 import com.loopers.domain.product.Product;
 import com.loopers.domain.product.ProductId;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -45,10 +49,13 @@ public class OrderApplicationService {
     private final TransactionTemplate transactionTemplate;
     private final PaymentAnomalyRepository paymentAnomalyRepository;
     private final Clock clock;
+    private final PaymentLookupScheduleRepository paymentLookupScheduleRepository;
+    private final PaymentLookupPolicy paymentLookupPolicy;
 
     public OrderApplicationService(OrderRepository orderRepository, ProductRepository productRepository,
         PaymentRecordRepository paymentRecordRepository, PaymentGatewayRegistry paymentGatewayRegistry,
-        TransactionTemplate transactionTemplate, PaymentAnomalyRepository paymentAnomalyRepository, Clock clock) {
+        TransactionTemplate transactionTemplate, PaymentAnomalyRepository paymentAnomalyRepository, Clock clock,
+        PaymentLookupScheduleRepository paymentLookupScheduleRepository, PaymentLookupPolicy paymentLookupPolicy) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
         this.paymentRecordRepository = paymentRecordRepository;
@@ -56,6 +63,8 @@ public class OrderApplicationService {
         this.transactionTemplate = transactionTemplate;
         this.paymentAnomalyRepository = paymentAnomalyRepository;
         this.clock = clock;
+        this.paymentLookupScheduleRepository = paymentLookupScheduleRepository;
+        this.paymentLookupPolicy = paymentLookupPolicy;
     }
 
     public record ItemRequest(long productId, int quantity) { }
@@ -238,6 +247,7 @@ public class OrderApplicationService {
     private OrderResult requireReview(Order order, PaymentRecord payment, Kind kind, String summary) {
         recordAnomaly(order.getId(), kind, summary);
         payment.requireReview();
+        paymentLookupScheduleRepository.delete(order.getId());
         return OrderResult.from(order, Optional.of(paymentRecordRepository.save(payment)));
     }
 
@@ -268,6 +278,7 @@ public class OrderApplicationService {
                 payment.applyProviderReport(report.status(), report.transactionKey());
                 payment = paymentRecordRepository.save(payment);
                 paymentAnomalyRepository.resolveTransient(order.getId(), clock.instant());
+                paymentLookupScheduleRepository.delete(order.getId());
             }
             case UNCHANGED -> {
                 if (order.getStatus() == Order.Status.PAYMENT_PENDING) {
@@ -308,14 +319,16 @@ public class OrderApplicationService {
         order.startPayment();
         orderRepository.save(order);
         String providerId = paymentGatewayRegistry.inPriorityOrder().get(0).providerId();
+        PaymentRecord payment;
         try {
-            PaymentRecord payment = paymentRecordRepository.save(
-                PaymentRecord.pgStarted(orderId, order.getTotal(), attemptKey, providerId));
-            return new PaymentStart(null, payment);
+            payment = paymentRecordRepository.save(PaymentRecord.pgStarted(orderId, order.getTotal(), attemptKey, providerId));
         } catch (DataIntegrityViolationException e) {
             // 같은 시도 키를 다른 주문이 동시에 쓴 경쟁. 사전 확인을 통과했어도 유일 제약이 막는다.
             throw new RuleViolationException("다른 주문에 사용한 결제 시도 키입니다.", e);
         }
+        Instant now = clock.instant();
+        paymentLookupScheduleRepository.save(new Schedule(orderId, paymentLookupPolicy.nextAt(now, 0), 0, now, now));
+        return new PaymentStart(null, payment);
     }
 
     private void reserveStock(Order order) {

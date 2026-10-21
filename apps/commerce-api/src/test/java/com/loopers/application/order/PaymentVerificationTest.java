@@ -2,8 +2,10 @@ package com.loopers.application.order;
 
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.PaymentLookupPolicy;
 import com.loopers.application.payment.port.PaymentAnomalyRepository;
 import com.loopers.application.payment.port.PaymentGateway;
+import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
 import com.loopers.application.payment.port.PaymentRecordRepository;
 import com.loopers.application.payment.port.PaymentTransaction;
 import com.loopers.application.payment.port.PaymentTransactionStatus;
@@ -13,9 +15,11 @@ import com.loopers.domain.common.Money;
 import com.loopers.domain.order.Order;
 import com.loopers.domain.order.OrderItem;
 import com.loopers.domain.order.Quantity;
+import com.loopers.domain.payment.LookupBackoff;
 import com.loopers.domain.payment.PaymentRecord;
 import com.loopers.domain.product.ProductId;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -66,7 +70,8 @@ class PaymentVerificationTest {
         when(payments.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         service = new OrderApplicationService(orders, products, payments,
             new PaymentGatewayRegistry(List.of(gateway), List.of("fake")), new TransactionTemplate(new LocalTransactions()),
-            anomalies, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+            anomalies, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), mock(PaymentLookupScheduleRepository.class),
+            new PaymentLookupPolicy(new LookupBackoff(Duration.ofSeconds(5), 2, Duration.ofMinutes(1)), maximum -> maximum, 12, 100));
         clearInvocations(gateway);
     }
 
