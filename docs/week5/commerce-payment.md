@@ -809,7 +809,7 @@ flowchart LR
 - 처리 순서: 결제 기록 찾기 → 트랜잭션 밖·잠금 없이 PG 조회 → 결과 반영 경계. 확인 필요(`NEEDS_REVIEW`) 기록은 callback 조회에서 제외한다(D41).
 - callback 키는 저장된 거래 키가 있으면 그 키와 비교한다. 저장 키가 없으면 조회 결과가 정확히 1건이고 주문 ID·금액이 일치할 때 그 거래 키와 비교한다. 비교 대상이 없으면(조회 실패·0건·2건 이상·불일치) 키 불일치 이상을 기록하지 않는다. 다르면 `CALLBACK_KEY_MISMATCH`(영구적)만 기록하고 확인 필요로 바꾸지 않으며 조회 결과 반영은 그대로 진행한다.
 - callback은 형식이 맞으면 조회 성공·실패와 무관하게 200. 모르는 orderId는 200 + WARN, 이상 테이블에는 쓰지 않는다. 본문 형식 오류는 400.
-- 관리자: `POST /api-admin/v1/orders/{orderId}/payment/reconcile`. 기존 관리자 보안 경계를 사용한다. 저장된 값으로 조회 → 결과 반영 경계이며 확인 필요도 처리한다. 응답은 관리자 주문 조회와 같은 모양 200, 없는 주문 404, PG 결제가 아닌 주문 409.
+- 관리자: `POST /api-admin/v1/orders/{orderId}/payment/reconcile`. 기존 관리자 보안 경계를 사용한다. 저장된 값으로 조회 → 결과 반영 경계이며 확인 필요도 처리한다. 응답은 관리자 주문 조회와 같은 모양 200, 없는 주문 404, PG 결제가 아닌 주문 409. 회로 열림으로 호출하지 못한 경우는 25절에 따라 503 + 기존 ApiResponse 오류 형식이며 주문·재고·스케줄·이상 기록을 바꾸지 않는다. 실제 PG 조회 실패는 기존 200 + 현재 상태·일시적 이상 기록이다.
 - 조회 결과와 create 보고는 `OrderApplicationService`의 결과 반영 경계에서 공통 내부 반영 메서드를 재사용한다. 트랜잭션 하나, 주문 → 상품 ID 오름차순 잠금, PG 호출은 그 밖을 지킨다.
 
 ### 조회 결과 해석
@@ -872,7 +872,9 @@ test-pg 어댑터는 조회 응답의 다른 orderId 거래도 걸러내지 않�
 - infrastructure에서 PG 어댑터를 감싼다. providerId별 별도 회로이며 verifyOrder만 적용하고 create는 그대로 전달한다. application·domain은 Resilience4j에 의존하지 않는다.
 - `payment.lookup.circuit.sliding-window-size=20`, `minimum-number-of-calls=10`, `failure-rate-threshold=50`, `open-duration=30s`, `half-open-calls=3`. 횟수 기반, 열림→반열림 자동 전환은 끄고 기존 Clock을 주입한다.
 - 조회 Failed(5xx·timeout·연결 실패·깨진 응답)는 실패 표본, 거래 있음·0건 Found는 성공 표본이다(D45). 회로가 호출을 거절하면 포트의 NotCalled로 보고한다.
-- NotCalled: callback은 200 + 로그, 자동 경로는 횟수·이상 기록 없이 다음 시각만 연기한다. 관리자 reconcile의 미호출 응답 계약은 별도 승인 요청 중이며 승인 후 기록·구현한다.
+- NotCalled: callback은 200 + 로그, 자동 경로는 횟수·이상 기록 없이 다음 시각만 연기한다. 관리자 reconcile은 503 + 기존 ApiResponse 오류 형식이며 주문·재고·스케줄·이상 기록은 유지한다(사용자 승인). 남은 열림 시간을 정확히 제공할 수 있으면 Retry-After(초)를 붙이고, 그렇지 않으면 생략 사실을 보고한다.
+
+회로 열림은 우리가 정책상 호출하지 않아 확인을 시도하지 않은 경우라 관리자 응답은 503이다. 실제 PG 500·timeout은 호출 후 실패를 관찰한 것이므로 기존 200 + 현재 상태 + LOOKUP_FAILED 기록을 유지한다.
 
 ### 한계
 
