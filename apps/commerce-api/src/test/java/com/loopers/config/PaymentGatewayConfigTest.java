@@ -5,6 +5,10 @@ import com.loopers.application.payment.port.PaymentCreateCommand;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
+import com.loopers.infrastructure.payment.PaymentCircuitBreakers;
+import com.loopers.infrastructure.payment.PaymentLookupCircuitProperties;
+import java.time.Clock;
+import java.time.Duration;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -14,6 +18,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class PaymentGatewayConfigTest {
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
         .withUserConfiguration(PaymentGatewayConfig.class)
+        .withBean(PaymentCircuitBreakers.class, () -> new PaymentCircuitBreakers(Clock.systemUTC(),
+            new PaymentLookupCircuitProperties(20, 10, 50, Duration.ofSeconds(30), 3)))
         .withBean("testPg", PaymentGateway.class, () -> new FakeGateway("test-pg"));
 
     @Test

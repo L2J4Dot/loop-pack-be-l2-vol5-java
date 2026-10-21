@@ -12,6 +12,9 @@ public sealed interface PaymentTransactionsLookup {
         }
     }
 
+    record NotCalled() implements PaymentTransactionsLookup {
+    }
+
     record Failed(String reason) implements PaymentTransactionsLookup {
     }
 }

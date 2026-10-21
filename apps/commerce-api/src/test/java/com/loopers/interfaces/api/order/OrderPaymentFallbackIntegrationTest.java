@@ -15,9 +15,11 @@ import com.loopers.infrastructure.payment.TestPgServer;
 import com.loopers.infrastructure.payment.TestPgServer.CreateBehavior;
 import com.loopers.infrastructure.user.UserJpaEntity;
 import com.loopers.infrastructure.user.UserJpaRepository;
+import com.loopers.support.pg.MutablePaymentClock;
 import com.loopers.support.pg.TestPgFixture;
 import com.loopers.utils.DatabaseCleanUp;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
@@ -28,6 +30,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
@@ -45,8 +48,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest
 @AutoConfigureMockMvc
+@Import(PaymentLookupScheduleIntegrationTest.TimeConfig.class)
 class OrderPaymentFallbackIntegrationTest {
     @Autowired private MockMvc mvc;
+    @Autowired private MutablePaymentClock clock;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private BrandApplicationService brands;
     @Autowired private ProductApplicationService products;
@@ -67,6 +72,7 @@ class OrderPaymentFallbackIntegrationTest {
 
     @BeforeEach
     void prepare() throws Exception {
+        clock.set(Instant.parse("2026-10-21T00:00:00Z"));
         main = new TestPgServer("135135", Duration.ofMillis(1500));
         sub = new TestPgServer("135135", Duration.ofMillis(1500));
         NamedGateway mainGateway = gateway("main", main);
@@ -130,6 +136,24 @@ class OrderPaymentFallbackIntegrationTest {
         scene("CONFIRMED", 3, "sub", "SUCCESS", 0, 1, 0, 1);
         assertThat(main.lookupCalls()).isZero();
         assertThat(sub.lookupCalls()).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from payment_anomalies", Long.class)).isZero();
+    }
+
+    @Test
+    @DisplayName("sub 전환 뒤 자동 재조회는 현재 sub만 조회해 확정하고 create 재발송 없이 스케줄을 지운다")
+    void automaticallyVerifiesCurrentSubProvider() throws Exception {
+        closeMain();
+        sub.createBehavior(CreateBehavior.ACCEPT_PENDING);
+        confirm().andExpect(status().isAccepted());
+        sub.changeStatus(sub.transactions().get(0).transactionKey(), "SUCCESS");
+        clock.advance(Duration.ofSeconds(5));
+
+        orders.reconcileDuePayments();
+
+        scene("CONFIRMED", 3, "sub", "SUCCESS", 0, 1, 0, 1);
+        assertThat(main.lookupCalls()).isZero();
+        assertThat(sub.lookupCalls()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from payment_lookup_schedules", Long.class)).isZero();
         assertThat(jdbc.queryForObject("select count(*) from payment_anomalies", Long.class)).isZero();
     }
 

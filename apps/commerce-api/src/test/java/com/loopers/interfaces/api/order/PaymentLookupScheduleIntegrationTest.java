@@ -5,6 +5,7 @@ import com.loopers.application.order.OrderApplicationService;
 import com.loopers.application.payment.port.LookupJitter;
 import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
 import com.loopers.application.product.ProductApplicationService;
+import com.loopers.infrastructure.payment.PaymentLookupScheduler;
 import com.loopers.infrastructure.payment.TestPgServer;
 import com.loopers.infrastructure.payment.TestPgServer.CreateBehavior;
 import com.loopers.infrastructure.user.UserJpaEntity;
@@ -34,6 +35,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
@@ -46,12 +48,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest
+@SpringBootTest(properties = "payment.lookup.batch-size=2")
 @AutoConfigureMockMvc
 @Import(PaymentLookupScheduleIntegrationTest.TimeConfig.class)
 class PaymentLookupScheduleIntegrationTest {
     private static final Instant NOW = Instant.parse("2026-10-21T00:00:00Z");
     @Autowired private MockMvc mvc;
+    @Autowired private ApplicationContext context;
     @Autowired private BrandApplicationService brands;
     @Autowired private ProductApplicationService products;
     @Autowired private OrderApplicationService orders;
@@ -170,6 +173,8 @@ class PaymentLookupScheduleIntegrationTest {
             assertThat(server.lookupCalls()).isEqualTo(attempt);
             if (attempt < 12) {
                 assertThat(schedules.findByOrderId(orderId).orElseThrow().actualAttempts()).isEqualTo(attempt);
+                assertThat(schedules.findByOrderId(orderId).orElseThrow().nextLookupAt())
+                    .isEqualTo(clock.instant().plusSeconds(Math.min(60, 5L << attempt)));
             }
         }
         scene("PAYMENT_PENDING", 3, "NEEDS_REVIEW", 1, 12);
@@ -299,6 +304,37 @@ class PaymentLookupScheduleIntegrationTest {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
         }
+    }
+
+    @Test
+    @DisplayName("테스트 프로필은 예약 실행 빈을 만들지 않아 직접 호출한 때만 자동 조회를 실행한다")
+    void disablesScheduledExecutionInTestProfile() {
+        assertThat(context.getBeansOfType(PaymentLookupScheduler.class)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("다음 시각과 주문 ID 순으로 최대 두 건만 조회하고 연속 실행은 아직 시각이 안 된 행을 건너뛴다")
+    void respectsBatchSizeAndDueOrder() {
+        startPending();
+        long firstOrder = orderId;
+        orderId = orders.create(1, List.of(new OrderApplicationService.ItemRequest(productId, 1))).id();
+        startPending();
+        long secondOrder = orderId;
+        orderId = orders.create(1, List.of(new OrderApplicationService.ItemRequest(productId, 1))).id();
+        startPending();
+        clock.advance(Duration.ofSeconds(5));
+        assertThat(schedules.findDue(clock.instant(), 2)).containsExactly(firstOrder, secondOrder);
+
+        orders.reconcileDuePayments();
+
+        scene("PAYMENT_PENDING", 1, "PENDING", 3, 2);
+        assertThat(schedules.findByOrderId(firstOrder).orElseThrow().actualAttempts()).isEqualTo(1);
+        assertThat(schedules.findByOrderId(secondOrder).orElseThrow().actualAttempts()).isEqualTo(1);
+        assertThat(schedules.findByOrderId(orderId).orElseThrow().actualAttempts()).isZero();
+        orders.reconcileDuePayments();
+        scene("PAYMENT_PENDING", 1, "PENDING", 3, 3);
+        assertThat(schedules.findByOrderId(orderId).orElseThrow().actualAttempts()).isEqualTo(1);
+        assertThat(anomalies()).isZero();
     }
 
     private long anomalies() {

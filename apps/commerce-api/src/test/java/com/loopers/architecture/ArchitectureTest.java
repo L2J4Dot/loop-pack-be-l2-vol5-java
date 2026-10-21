@@ -8,8 +8,10 @@ import com.loopers.application.payment.port.PaymentGateway;
 import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import com.loopers.domain.payment.LookupBackoff;
+import com.loopers.infrastructure.payment.CircuitBreakingPaymentGateway;
 import com.loopers.infrastructure.payment.PaymentAnomalyJpaEntity;
 import com.loopers.infrastructure.payment.PaymentAnomalyPersistenceAdapter;
+import com.loopers.infrastructure.payment.PaymentCircuitBreakers;
 import com.loopers.infrastructure.payment.PaymentLookupScheduleJpaEntity;
 import com.loopers.infrastructure.payment.PaymentLookupScheduler;
 import com.loopers.infrastructure.payment.TestPgPaymentGateway;
@@ -75,7 +77,7 @@ class ArchitectureTest {
 
         noClasses().should().dependOnClassesThat()
             .resideInAnyPackage("java.net..", "org.springframework.web..", "org.springframework.http..",
-                "com.fasterxml.jackson..")
+                "com.fasterxml.jackson..", "io.github.resilience4j..")
             .check(coreLayers);
     }
 
@@ -99,6 +101,9 @@ class ArchitectureTest {
         assertThat(CLASSES.contain(LookupBackoff.class)).isTrue();
         assertThat(infrastructure.contain(PaymentLookupScheduleJpaEntity.class)).isTrue();
         assertThat(infrastructure.contain(PaymentLookupScheduler.class)).isTrue();
+        assertThat(infrastructure.contain(CircuitBreakingPaymentGateway.class)).isTrue();
+        assertThat(infrastructure.contain(PaymentCircuitBreakers.class)).isTrue();
+        assertThat(application.contain(PaymentTransactionsLookup.NotCalled.class)).isTrue();
     }
 
     private static boolean isLegacyExample(String packageName) {

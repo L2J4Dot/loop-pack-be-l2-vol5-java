@@ -13,6 +13,7 @@ import com.loopers.application.product.port.ProductRepository;
 import com.loopers.domain.order.Order;
 import com.loopers.domain.payment.PaymentRecord;
 import com.loopers.infrastructure.order.OrderPersistenceAdapter;
+import com.loopers.infrastructure.payment.PaymentLookupSchedulePersistenceAdapter;
 import com.loopers.infrastructure.payment.PaymentRecordPersistenceAdapter;
 import com.loopers.infrastructure.payment.TestPgServer;
 import com.loopers.infrastructure.payment.TestPgServer.CreateBehavior;
@@ -93,6 +94,9 @@ class OrderTransactionTest {
     private FailingOrderRepository failingOrderRepository;
 
     @Autowired
+    private FailingScheduleRepository failingScheduleRepository;
+
+    @Autowired
     private FailingPaymentRecordRepository failingPaymentRecordRepository;
 
     @Autowired
@@ -139,6 +143,7 @@ class OrderTransactionTest {
     void clean() throws InterruptedException {
         testPgFixture.close();
         failingOrderRepository.disarm();
+        failingScheduleRepository.armed = false;
         failingPaymentRecordRepository.disarm();
         jdbcTemplate.update("delete from order_items");
         databaseCleanUp.truncateAllTables();
@@ -174,6 +179,20 @@ class OrderTransactionTest {
         assertThat(failingPaymentRecordRepository.stateBeforeFailure()).isEqualTo("stock=3/4, order=PAYMENT_PENDING");
         assertState("DRAFT", 5, 5, 0);
         assertThat(paymentRecords()).isZero();
+    }
+
+    @Test
+    @DisplayName("스케줄 INSERT까지 flush한 뒤 A가 실패하면 주문·재고·결제 기록·스케줄이 모두 롤백되고 create는 나가지 않는다")
+    void rollsBackScheduleWithTransactionA() {
+        failingScheduleRepository.armed = true;
+
+        assertThatThrownBy(() -> orderApplicationService.confirm(1, orderId, TestPgFixture.command()))
+            .isInstanceOf(IllegalStateException.class).hasMessage("주입된 스케줄 저장 실패");
+
+        assertThat(failingScheduleRepository.beforeFailure).isEqualTo("stock=3/4, schedule=1");
+        assertState("DRAFT", 5, 5, 0);
+        assertThat(paymentRecords()).isZero();
+        assertThat(paymentLookupScheduleRepository.findByOrderId(orderId)).isEmpty();
     }
 
     @Test
@@ -281,6 +300,13 @@ class OrderTransactionTest {
     static class FailureInjectionConfig {
         @Bean
         @Primary
+        FailingScheduleRepository failingScheduleRepository(PaymentLookupSchedulePersistenceAdapter delegate,
+            EntityManager entityManager, JdbcTemplate jdbcTemplate) {
+            return new FailingScheduleRepository(delegate, entityManager, jdbcTemplate);
+        }
+
+        @Bean
+        @Primary
         MutablePaymentClock transactionClock() {
             return new MutablePaymentClock();
         }
@@ -298,6 +324,46 @@ class OrderTransactionTest {
             PaymentRecordPersistenceAdapter paymentRecordPersistenceAdapter, EntityManager entityManager,
             JdbcTemplate jdbcTemplate) {
             return new FailingPaymentRecordRepository(paymentRecordPersistenceAdapter, entityManager, jdbcTemplate);
+        }
+    }
+
+    static class FailingScheduleRepository implements PaymentLookupScheduleRepository {
+        private final PaymentLookupScheduleRepository delegate;
+        private final EntityManager entityManager;
+        private final JdbcTemplate jdbcTemplate;
+        private boolean armed;
+        private String beforeFailure;
+
+        FailingScheduleRepository(PaymentLookupScheduleRepository delegate, EntityManager entityManager, JdbcTemplate jdbcTemplate) {
+            this.delegate = delegate;
+            this.entityManager = entityManager;
+            this.jdbcTemplate = jdbcTemplate;
+        }
+
+        @Override
+        public void save(Schedule schedule) {
+            delegate.save(schedule);
+            if (armed) {
+                entityManager.flush();
+                beforeFailure = stockState(jdbcTemplate) + ", schedule="
+                    + jdbcTemplate.queryForObject("select count(*) from payment_lookup_schedules", Long.class);
+                throw new IllegalStateException("주입된 스케줄 저장 실패");
+            }
+        }
+
+        @Override
+        public Optional<Schedule> findByOrderId(long orderId) {
+            return delegate.findByOrderId(orderId);
+        }
+
+        @Override
+        public List<Long> findDue(Instant now, int limit) {
+            return delegate.findDue(now, limit);
+        }
+
+        @Override
+        public void delete(long orderId) {
+            delegate.delete(orderId);
         }
     }
 

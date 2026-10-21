@@ -2,6 +2,7 @@ package com.loopers.application.order;
 
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.PaymentLookupNotCalledException;
 import com.loopers.application.payment.PaymentLookupPolicy;
 import com.loopers.application.payment.port.PaymentAnomalyRepository;
 import com.loopers.application.payment.port.PaymentAnomalyRepository.Kind;
@@ -197,6 +198,13 @@ public class OrderApplicationService {
         // callback 본문은 누구나 보낼 수 있는 신호다. 저장된 값으로 잠금·트랜잭션 밖에서 PG를 조회한다.
         PaymentTransactionsLookup lookup = paymentGatewayRegistry.get(requested.getProviderId())
             .verifyOrder(requested.getProviderOrderId(), requested.getTransactionKey());
+        if (lookup instanceof PaymentTransactionsLookup.NotCalled) {
+            log.info("조회 회로 정책으로 PG를 호출하지 않았습니다. orderId={}, providerId={}, source={}",
+                requested.getOrderId(), requested.getProviderId(), source);
+            if (source == LookupSource.MANUAL) {
+                throw new PaymentLookupNotCalledException();
+            }
+        }
         return transactionTemplate.execute(status -> {
             Order order = orderRepository.findByIdForUpdate(requested.getOrderId()).orElseThrow(OrderNotFoundException::new);
             PaymentRecord payment = paymentRecordRepository.findByOrderId(order.getId()).orElseThrow();
@@ -206,7 +214,7 @@ public class OrderApplicationService {
             }
             OrderResult result = applyLookupLocked(order, payment, lookup, source, callbackKey);
             if (source == LookupSource.AUTOMATIC) {
-                advanceLookupSchedule(order, payment);
+                advanceLookupSchedule(order, payment, lookup);
             }
             return result;
         });
@@ -214,6 +222,9 @@ public class OrderApplicationService {
 
     private OrderResult applyLookupLocked(Order order, PaymentRecord payment, PaymentTransactionsLookup lookup,
         LookupSource source, String callbackKey) {
+        if (lookup instanceof PaymentTransactionsLookup.NotCalled) {
+            return OrderResult.from(order, Optional.of(payment));
+        }
         if (source == LookupSource.CALLBACK) {
             recordCallbackKeyMismatch(order.getId(), payment.getTransactionKey(), callbackKey);
         }
@@ -253,7 +264,7 @@ public class OrderApplicationService {
         return applyLocked(order, Optional.of(payment), report, source == LookupSource.MANUAL);
     }
 
-    private void advanceLookupSchedule(Order order, PaymentRecord payment) {
+    private void advanceLookupSchedule(Order order, PaymentRecord payment, PaymentTransactionsLookup lookup) {
         if (order.getStatus() != Order.Status.PAYMENT_PENDING
             || payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW) {
             paymentLookupScheduleRepository.delete(order.getId());
@@ -264,8 +275,9 @@ public class OrderApplicationService {
             return;
         }
         Schedule schedule = found.get();
-        int attempts = schedule.actualAttempts() + 1;
-        if (attempts >= paymentLookupPolicy.maxAttempts()) {
+        boolean contacted = !(lookup instanceof PaymentTransactionsLookup.NotCalled);
+        int attempts = schedule.actualAttempts() + (contacted ? 1 : 0);
+        if (contacted && attempts >= paymentLookupPolicy.maxAttempts()) {
             // 조회 한도는 효과 없음의 증거가 아니다. 실패 확정 대신 수동 확인 대상으로 남긴다.
             requireReview(order, payment, Kind.LOOKUP_LIMIT_EXHAUSTED, "actualAttempts=" + attempts);
             return;

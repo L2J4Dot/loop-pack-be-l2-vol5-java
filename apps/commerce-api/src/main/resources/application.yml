@@ -52,6 +52,12 @@ payment:
     max-delay: 1m
     max-attempts: 12
     batch-size: 100
+    circuit:
+      sliding-window-size: 20
+      minimum-number-of-calls: 10
+      failure-rate-threshold: 50
+      open-duration: 30s
+      half-open-calls: 3
     scheduler:
       enabled: true
       fixed-delay: PT1S

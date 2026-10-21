@@ -2,6 +2,7 @@ package com.loopers.config;
 
 import com.loopers.application.payment.PaymentGatewayRegistry;
 import com.loopers.application.payment.port.PaymentGateway;
+import com.loopers.infrastructure.payment.PaymentCircuitBreakers;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -13,7 +14,8 @@ import org.springframework.context.annotation.Configuration;
 public class PaymentGatewayConfig {
     @Bean
     PaymentGatewayRegistry paymentGatewayRegistry(ObjectProvider<PaymentGateway> gateways,
-        PaymentProvidersProperties properties) {
-        return new PaymentGatewayRegistry(gateways.orderedStream().toList(), properties.priority());
+        PaymentProvidersProperties properties, PaymentCircuitBreakers paymentCircuitBreakers) {
+        return new PaymentGatewayRegistry(
+            gateways.orderedStream().map(paymentCircuitBreakers::wrap).toList(), properties.priority());
     }
 }
