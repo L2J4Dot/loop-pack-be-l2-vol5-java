@@ -30,6 +30,7 @@ public class TestPgFixture {
     private volatile TestPgServer server;
     private volatile PaymentGateway delegate;
     private volatile boolean crashBeforeSend;
+    private volatile String failingLookupOrder;
     private final PaymentGateway gateway = new DelegatingGateway();
 
     public TestPgFixture(ObjectMapper objectMapper) {
@@ -55,6 +56,7 @@ public class TestPgFixture {
         }
         delegate = newClient();
         crashBeforeSend = false;
+        failingLookupOrder = null;
         return server;
     }
 
@@ -77,11 +79,16 @@ public class TestPgFixture {
         crashBeforeSend = true;
     }
 
+    public void failLookupFor(String providerOrderId) {
+        failingLookupOrder = providerOrderId;
+    }
+
     public void close() throws InterruptedException {
         TestPgServer current = server;
         server = null;
         delegate = null;
         crashBeforeSend = false;
+        failingLookupOrder = null;
         if (current != null) {
             current.close();
         }
@@ -115,6 +122,9 @@ public class TestPgFixture {
 
         @Override
         public PaymentTransactionsLookup verifyOrder(String providerOrderId, String storedTransactionKey) {
+            if (providerOrderId.equals(failingLookupOrder)) {
+                throw new IllegalStateException("주입된 주문별 조회 예외");
+            }
             return client().verifyOrder(providerOrderId, storedTransactionKey);
         }
     }

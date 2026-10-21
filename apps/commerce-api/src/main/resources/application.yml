@@ -46,6 +46,16 @@ payment:
       connect-timeout: 1s
       read-timeout: 3s
 
+  lookup:
+    initial-delay: 5s
+    multiplier: 2
+    max-delay: 1m
+    max-attempts: 12
+    batch-size: 100
+    scheduler:
+      enabled: true
+      fixed-delay: PT1S
+
 springdoc:
   use-fqn: true
   swagger-ui:
@@ -78,3 +88,13 @@ spring:
 springdoc:
   api-docs:
     enabled: false
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+payment:
+  lookup:
+    scheduler:
+      enabled: false

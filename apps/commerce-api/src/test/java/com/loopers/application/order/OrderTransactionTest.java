@@ -18,10 +18,11 @@ import com.loopers.infrastructure.payment.TestPgServer;
 import com.loopers.infrastructure.payment.TestPgServer.CreateBehavior;
 import com.loopers.infrastructure.user.UserJpaEntity;
 import com.loopers.infrastructure.user.UserJpaRepository;
+import com.loopers.support.pg.MutablePaymentClock;
 import com.loopers.support.pg.TestPgFixture;
 import com.loopers.utils.DatabaseCleanUp;
 import jakarta.persistence.EntityManager;
-import java.time.Clock;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -68,7 +69,7 @@ class OrderTransactionTest {
     private PaymentAnomalyRepository paymentAnomalyRepository;
 
     @Autowired
-    private Clock clock;
+    private MutablePaymentClock clock;
 
     @Autowired
     private PaymentLookupPolicy paymentLookupPolicy;
@@ -122,6 +123,7 @@ class OrderTransactionTest {
 
     @BeforeEach
     void prepare() {
+        clock.set(Instant.parse("2026-10-21T00:00:00Z"));
         server = testPgFixture.start();
         userJpaRepository.save(new UserJpaEntity(1));
         long brandId = brandApplicationService.create("브랜드").id().value();
@@ -207,6 +209,29 @@ class OrderTransactionTest {
     }
 
     @Test
+    @DisplayName("PG 성공 뒤 B 저장 실패로 202를 반환해도 시각이 되면 자동 재조회가 한 번 확정하고 스케줄을 지운다")
+    void automaticallyRecoversAfterResultSaveFailure() throws Exception {
+        server.createBehavior(CreateBehavior.ACCEPT_SUCCESS);
+        failingPaymentRecordRepository.failOnSave(2);
+        mvc.perform(post("/api/v1/orders/{id}/confirm", orderId).header("X-USER-ID", "1")
+                .contentType(MediaType.APPLICATION_JSON).content("{\"paymentAttemptKey\":\"" + UUID.randomUUID()
+                    + "\",\"cardType\":\"" + TestPgFixture.CARD_TYPE + "\",\"cardNo\":\"" + TestPgFixture.CARD_NO + "\"}"))
+            .andExpect(status().isAccepted());
+        assertState("PAYMENT_PENDING", 3, 4, 1);
+        clock.set(paymentLookupScheduleRepository.findByOrderId(orderId).orElseThrow().nextLookupAt());
+
+        orderApplicationService.reconcileDuePayments();
+        orderApplicationService.reconcileDuePayments();
+
+        assertState("CONFIRMED", 3, 4, 1);
+        assertThat(paymentRecord()).containsEntry("provider_status", "SUCCESS");
+        assertThat(paymentLookupScheduleRepository.findByOrderId(orderId)).isEmpty();
+        assertThat(server.lookupCalls()).isEqualTo(1);
+        assertThat(server.transactions()).hasSize(1);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from payment_anomalies", Long.class)).isZero();
+    }
+
+    @Test
     @DisplayName("트랜잭션 A commit 뒤 create 전에 멈췄다가 서비스·클라이언트를 다시 만들어 같은 키로 확정하면 결제 대기를 돌려주고 create를 보내지 않는다")
     void doesNotResendAfterRestart() {
         String attemptKey = UUID.randomUUID().toString();
@@ -254,6 +279,12 @@ class OrderTransactionTest {
 
     @TestConfiguration
     static class FailureInjectionConfig {
+        @Bean
+        @Primary
+        MutablePaymentClock transactionClock() {
+            return new MutablePaymentClock();
+        }
+
         @Bean
         @Primary
         FailingOrderRepository failingOrderRepository(OrderPersistenceAdapter orderPersistenceAdapter,

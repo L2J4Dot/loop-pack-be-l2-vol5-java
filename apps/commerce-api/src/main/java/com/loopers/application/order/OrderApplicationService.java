@@ -69,6 +69,8 @@ public class OrderApplicationService {
 
     public record ItemRequest(long productId, int quantity) { }
 
+    private enum LookupSource { CALLBACK, MANUAL, AUTOMATIC }
+
     private record PaymentStart(OrderResult current, PaymentRecord payment) {
         boolean newlyStarted() {
             return current == null;
@@ -166,7 +168,7 @@ public class OrderApplicationService {
         if (payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW) {
             return;
         }
-        verifyPayment(payment, false, callbackKey);
+        verifyPayment(payment, LookupSource.CALLBACK, callbackKey);
     }
 
     public OrderResult reconcilePayment(long orderId) {
@@ -174,10 +176,24 @@ public class OrderApplicationService {
         PaymentRecord payment = paymentRecordRepository.findByOrderId(orderId)
             .filter(found -> found.getMethod() == PaymentRecord.Method.PG)
             .orElseThrow(() -> new RuleViolationException("PG 결제가 아닌 주문은 조회 확정할 수 없습니다."));
-        return verifyPayment(payment, true, null);
+        return verifyPayment(payment, LookupSource.MANUAL, null);
     }
 
-    private OrderResult verifyPayment(PaymentRecord requested, boolean manual, String callbackKey) {
+    public void reconcileDuePayments() {
+        List<Long> dueOrders = paymentLookupScheduleRepository.findDue(clock.instant(), paymentLookupPolicy.batchSize());
+        for (long orderId : dueOrders) {
+            try {
+                Optional<PaymentRecord> payment = paymentRecordRepository.findByOrderId(orderId);
+                if (payment.isPresent() && payment.get().getProviderStatus() != PaymentRecord.ProviderStatus.NEEDS_REVIEW) {
+                    verifyPayment(payment.get(), LookupSource.AUTOMATIC, null);
+                }
+            } catch (RuntimeException e) {
+                log.error("주문 자동 재조회 처리 실패. orderId={}, causeType={}", orderId, e.getClass().getSimpleName());
+            }
+        }
+    }
+
+    private OrderResult verifyPayment(PaymentRecord requested, LookupSource source, String callbackKey) {
         // callback 본문은 누구나 보낼 수 있는 신호다. 저장된 값으로 잠금·트랜잭션 밖에서 PG를 조회한다.
         PaymentTransactionsLookup lookup = paymentGatewayRegistry.get(requested.getProviderId())
             .verifyOrder(requested.getProviderOrderId(), requested.getTransactionKey());
@@ -185,47 +201,78 @@ public class OrderApplicationService {
             Order order = orderRepository.findByIdForUpdate(requested.getOrderId()).orElseThrow(OrderNotFoundException::new);
             PaymentRecord payment = paymentRecordRepository.findByOrderId(order.getId()).orElseThrow();
             if (!payment.getProviderId().equals(requested.getProviderId())
-                || (!manual && payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW)) {
+                || (source != LookupSource.MANUAL && payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW)) {
                 return OrderResult.from(order, Optional.of(payment));
             }
-            if (!manual) {
-                recordCallbackKeyMismatch(order.getId(), payment.getTransactionKey(), callbackKey);
+            OrderResult result = applyLookupLocked(order, payment, lookup, source, callbackKey);
+            if (source == LookupSource.AUTOMATIC) {
+                advanceLookupSchedule(order, payment);
             }
-            if (lookup instanceof PaymentTransactionsLookup.Failed) {
-                recordTransientAnomaly(order, Kind.LOOKUP_FAILED, "lookupFailed=true");
-                return OrderResult.from(order, Optional.of(payment));
-            }
-            PaymentTransactionsLookup.Found found = (PaymentTransactionsLookup.Found) lookup;
-            List<PaymentTransaction> transactions = found.transactions();
-            if (transactions.isEmpty()) {
-                // 0건은 효과 없음의 증거가 아니다. 저장 키가 있어도 재발송·실패 확정하지 않는다.
-                recordTransientAnomaly(order, Kind.NO_TRANSACTION,
-                    "count=0, storedKeyPresent=" + (payment.getTransactionKey() != null));
-                return OrderResult.from(order, Optional.of(payment));
-            }
-            if (found.coverage() == PaymentTransactionsLookup.Coverage.ALL && transactions.size() > 1) {
-                return requireReview(order, payment, Kind.DUPLICATE_TRANSACTIONS, "count=" + transactions.size());
-            }
-            if (found.coverage() == PaymentTransactionsLookup.Coverage.SINGLE && transactions.size() > 1) {
-                return requireReview(order, payment, Kind.COVERAGE_CONTRACT_VIOLATION, "count=" + transactions.size());
-            }
-            PaymentTransaction transaction = transactions.get(0);
-            boolean orderMatches = payment.getProviderOrderId().equals(transaction.providerOrderId());
-            boolean amountMatches = payment.getAmount().equals(transaction.amount());
-            boolean keyMatches = payment.getTransactionKey() == null
-                || payment.getTransactionKey().equals(transaction.transactionKey());
-            if (!orderMatches || !amountMatches || !keyMatches) {
-                return requireReview(order, payment, Kind.TRANSACTION_MISMATCH,
-                    "orderMatches=" + orderMatches + ", amountMatches=" + amountMatches + ", keyMatches=" + keyMatches);
-            }
-            if (!manual && payment.getTransactionKey() == null && transactions.size() == 1) {
-                // 저장 키가 없으면 주문 ID·금액이 일치하는 단일 조회 거래만 비교 근거로 쓴다.
-                recordCallbackKeyMismatch(order.getId(), transaction.transactionKey(), callbackKey);
-            }
-            PaymentReport report = new PaymentReport(PaymentRecord.ProviderStatus.valueOf(transaction.status().name()),
-                transaction.transactionKey());
-            return applyLocked(order, Optional.of(payment), report, manual);
+            return result;
         });
+    }
+
+    private OrderResult applyLookupLocked(Order order, PaymentRecord payment, PaymentTransactionsLookup lookup,
+        LookupSource source, String callbackKey) {
+        if (source == LookupSource.CALLBACK) {
+            recordCallbackKeyMismatch(order.getId(), payment.getTransactionKey(), callbackKey);
+        }
+        if (lookup instanceof PaymentTransactionsLookup.Failed) {
+            recordTransientAnomaly(order, Kind.LOOKUP_FAILED, "lookupFailed=true");
+            return OrderResult.from(order, Optional.of(payment));
+        }
+        PaymentTransactionsLookup.Found found = (PaymentTransactionsLookup.Found) lookup;
+        List<PaymentTransaction> transactions = found.transactions();
+        if (transactions.isEmpty()) {
+            // 0건은 효과 없음의 증거가 아니다. 저장 키가 있어도 재발송·실패 확정하지 않는다.
+            recordTransientAnomaly(order, Kind.NO_TRANSACTION,
+                "count=0, storedKeyPresent=" + (payment.getTransactionKey() != null));
+            return OrderResult.from(order, Optional.of(payment));
+        }
+        if (found.coverage() == PaymentTransactionsLookup.Coverage.ALL && transactions.size() > 1) {
+            return requireReview(order, payment, Kind.DUPLICATE_TRANSACTIONS, "count=" + transactions.size());
+        }
+        if (found.coverage() == PaymentTransactionsLookup.Coverage.SINGLE && transactions.size() > 1) {
+            return requireReview(order, payment, Kind.COVERAGE_CONTRACT_VIOLATION, "count=" + transactions.size());
+        }
+        PaymentTransaction transaction = transactions.get(0);
+        boolean orderMatches = payment.getProviderOrderId().equals(transaction.providerOrderId());
+        boolean amountMatches = payment.getAmount().equals(transaction.amount());
+        boolean keyMatches = payment.getTransactionKey() == null
+            || payment.getTransactionKey().equals(transaction.transactionKey());
+        if (!orderMatches || !amountMatches || !keyMatches) {
+            return requireReview(order, payment, Kind.TRANSACTION_MISMATCH,
+                "orderMatches=" + orderMatches + ", amountMatches=" + amountMatches + ", keyMatches=" + keyMatches);
+        }
+        if (source == LookupSource.CALLBACK && payment.getTransactionKey() == null && transactions.size() == 1) {
+            // 저장 키가 없으면 주문 ID·금액이 일치하는 단일 조회 거래만 비교 근거로 쓴다.
+            recordCallbackKeyMismatch(order.getId(), transaction.transactionKey(), callbackKey);
+        }
+        PaymentReport report = new PaymentReport(PaymentRecord.ProviderStatus.valueOf(transaction.status().name()),
+            transaction.transactionKey());
+        return applyLocked(order, Optional.of(payment), report, source == LookupSource.MANUAL);
+    }
+
+    private void advanceLookupSchedule(Order order, PaymentRecord payment) {
+        if (order.getStatus() != Order.Status.PAYMENT_PENDING
+            || payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW) {
+            paymentLookupScheduleRepository.delete(order.getId());
+            return;
+        }
+        Optional<Schedule> found = paymentLookupScheduleRepository.findByOrderId(order.getId());
+        if (found.isEmpty()) {
+            return;
+        }
+        Schedule schedule = found.get();
+        int attempts = schedule.actualAttempts() + 1;
+        if (attempts >= paymentLookupPolicy.maxAttempts()) {
+            // 조회 한도는 효과 없음의 증거가 아니다. 실패 확정 대신 수동 확인 대상으로 남긴다.
+            requireReview(order, payment, Kind.LOOKUP_LIMIT_EXHAUSTED, "actualAttempts=" + attempts);
+            return;
+        }
+        Instant now = clock.instant();
+        paymentLookupScheduleRepository.save(new Schedule(order.getId(), paymentLookupPolicy.nextAt(now, attempts),
+            attempts, schedule.createdAt(), now));
     }
 
     private void recordTransientAnomaly(Order order, Kind kind, String summary) {

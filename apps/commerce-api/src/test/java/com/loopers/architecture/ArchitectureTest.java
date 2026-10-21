@@ -1,12 +1,17 @@
 package com.loopers.architecture;
 
 import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.PaymentLookupPolicy;
 import com.loopers.application.payment.port.PaymentAnomalyRepository;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
+import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
+import com.loopers.domain.payment.LookupBackoff;
 import com.loopers.infrastructure.payment.PaymentAnomalyJpaEntity;
 import com.loopers.infrastructure.payment.PaymentAnomalyPersistenceAdapter;
+import com.loopers.infrastructure.payment.PaymentLookupScheduleJpaEntity;
+import com.loopers.infrastructure.payment.PaymentLookupScheduler;
 import com.loopers.infrastructure.payment.TestPgPaymentGateway;
 import com.loopers.interfaces.api.payment.PaymentCallbackController;
 import com.tngtech.archunit.core.domain.JavaClasses;
@@ -89,6 +94,11 @@ class ArchitectureTest {
         assertThat(infrastructure.contain(PaymentAnomalyJpaEntity.class)).isTrue();
         assertThat(infrastructure.contain(PaymentAnomalyPersistenceAdapter.class)).isTrue();
         assertThat(CLASSES.contain(PaymentCallbackController.class)).isTrue();
+        assertThat(application.contain(PaymentLookupPolicy.class)).isTrue();
+        assertThat(application.contain(PaymentLookupScheduleRepository.class)).isTrue();
+        assertThat(CLASSES.contain(LookupBackoff.class)).isTrue();
+        assertThat(infrastructure.contain(PaymentLookupScheduleJpaEntity.class)).isTrue();
+        assertThat(infrastructure.contain(PaymentLookupScheduler.class)).isTrue();
     }
 
     private static boolean isLegacyExample(String packageName) {
