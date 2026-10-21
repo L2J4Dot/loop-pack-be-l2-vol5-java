@@ -4,6 +4,7 @@ import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentGatewayRegistry;
 import com.loopers.application.payment.port.PaymentCreateCommand;
 import com.loopers.application.payment.port.PaymentCreateResult;
+import com.loopers.application.payment.port.PaymentGateway;
 import com.loopers.application.payment.port.PaymentRecordRepository;
 import com.loopers.application.product.ProductNotFoundException;
 import com.loopers.application.product.port.ProductRepository;
@@ -81,17 +82,51 @@ public class OrderApplicationService {
             return start.current();
         }
         PaymentRecord payment = start.payment();
-        PaymentCreateResult created = paymentGatewayRegistry.get(payment.getProviderId()).create(new PaymentCreateCommand(
-            payment.getProviderOrderId(), command.cardType(), command.cardNo(), payment.getAmount()));
-        PaymentReport report = PaymentReport.from(created);
+        PaymentReport report = createPayment(payment, command);
         try {
             return applyPaymentResult(orderId, report);
         } catch (RuntimeException e) {
             // 외부 결제 사실은 rollback할 수 없으므로 저장된 주문을 새로 읽어 확인 경로로 돌려준다.
-            log.error("PG 호출 후 결과 저장에 실패했습니다.orderId={}, providerStatus={}", orderId, report.status());
+            log.error("PG 호출 후 결과 저장에 실패했습니다. orderId={}, providerStatus={}", orderId, report.status());
             return transactionTemplate.execute(status -> withPayment(
                 orderRepository.findById(orderId).orElseThrow(OrderNotFoundException::new)));
         }
+    }
+
+    private PaymentReport createPayment(PaymentRecord payment, ConfirmCommand command) {
+        List<PaymentGateway> gateways = paymentGatewayRegistry.inPriorityOrder();
+        for (int index = 0; index < gateways.size(); index++) {
+            PaymentGateway gateway = gateways.get(index);
+            PaymentCreateResult created = gateway.create(new PaymentCreateCommand(
+                payment.getProviderOrderId(), command.cardType(), command.cardNo(), payment.getAmount()));
+            log.info("PG 결제 생성 시도 결과. orderId={}, providerId={}, result={}",
+                payment.getOrderId(), gateway.providerId(), created.getClass().getSimpleName());
+            if (!(created instanceof PaymentCreateResult.NotSent)) {
+                return PaymentReport.from(created);
+            }
+            if (index + 1 == gateways.size()) {
+                return new PaymentReport(PaymentRecord.ProviderStatus.ALL_NOT_SENT, null);
+            }
+            String nextProviderId = gateways.get(index + 1).providerId();
+            String currentProviderId = gateway.providerId();
+            Boolean switched = transactionTemplate.execute(status -> {
+                Order order = orderRepository.findByIdForUpdate(payment.getOrderId()).orElseThrow(OrderNotFoundException::new);
+                PaymentRecord current = paymentRecordRepository.findByOrderId(order.getId()).orElseThrow();
+                if (order.getStatus() != Order.Status.PAYMENT_PENDING
+                    || current.getResult() != PaymentRecord.Result.PENDING
+                    || !currentProviderId.equals(current.getProviderId())) {
+                    return false;
+                }
+                // 다음 PG를 부르기 전에 저장해야 중단 후에도 조회 대상이 발송 가능성이 있는 PG를 가리킨다.
+                current.switchProvider(nextProviderId);
+                paymentRecordRepository.save(current);
+                return true;
+            });
+            if (!Boolean.TRUE.equals(switched)) {
+                return new PaymentReport(PaymentRecord.ProviderStatus.UNKNOWN, null);
+            }
+        }
+        throw new IllegalStateException("PG 우선순위 목록이 비어 있습니다.");
     }
 
     // PG가 보고한 결과 하나를 반영하는 유일한 경계. create 응답·조회·callback 모두 여기로 모은다(설계 23절).

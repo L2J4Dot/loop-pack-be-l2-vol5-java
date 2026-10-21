@@ -21,7 +21,6 @@ public record PaymentReport(PaymentRecord.ProviderStatus status, String transact
             }, accepted.transaction().transactionKey());
             case PaymentCreateResult.RejectedNoEffect rejected ->
                 new PaymentReport(PaymentRecord.ProviderStatus.REJECTED_NO_EFFECT, null);
-            // 모든 PG 미발송 시 처리(서브 PG 전환 등)는 미결이라 지금은 결제 대기로 남긴다(설계 23절).
             case PaymentCreateResult.NotSent notSent -> new PaymentReport(PaymentRecord.ProviderStatus.NOT_SENT, null);
             case PaymentCreateResult.Unknown unknown -> new PaymentReport(PaymentRecord.ProviderStatus.UNKNOWN, null);
         };
@@ -30,7 +29,7 @@ public record PaymentReport(PaymentRecord.ProviderStatus status, String transact
     Order.PaymentOutcome outcome() {
         return switch (status) {
             case SUCCESS -> Order.PaymentOutcome.SUCCEEDED;
-            case FAILED, REJECTED_NO_EFFECT -> Order.PaymentOutcome.FAILED;
+            case FAILED, REJECTED_NO_EFFECT, ALL_NOT_SENT -> Order.PaymentOutcome.FAILED;
             case SEND_STARTED, NOT_SENT, PENDING, UNKNOWN -> Order.PaymentOutcome.UNKNOWN;
         };
     }

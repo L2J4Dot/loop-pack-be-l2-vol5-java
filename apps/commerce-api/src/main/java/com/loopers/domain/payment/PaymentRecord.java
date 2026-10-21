@@ -9,7 +9,7 @@ public final class PaymentRecord {
 
     public enum Result { PENDING, SUCCESS, FAILED }
 
-    public enum ProviderStatus { SEND_STARTED, NOT_SENT, PENDING, SUCCESS, FAILED, REJECTED_NO_EFFECT, UNKNOWN }
+    public enum ProviderStatus { SEND_STARTED, NOT_SENT, PENDING, SUCCESS, FAILED, REJECTED_NO_EFFECT, UNKNOWN, ALL_NOT_SENT }
 
     private final Long id;
     private final long orderId;
@@ -17,7 +17,7 @@ public final class PaymentRecord {
     private final Money amount;
     private Result result;
     private final String attemptKey;
-    private final String providerId;
+    private String providerId;
     private final String providerOrderId;
     private String transactionKey;
     private ProviderStatus providerStatus;
@@ -66,6 +66,14 @@ public final class PaymentRecord {
             providerStatus);
     }
 
+    public void switchProvider(String nextProviderId) {
+        if (method != Method.PG || result != Result.PENDING || nextProviderId == null || nextProviderId.isBlank()) {
+            throw new RuleViolationException("결제 대기 중인 PG 기록만 다음 PG로 전환할 수 있습니다.");
+        }
+        providerId = nextProviderId;
+        providerStatus = ProviderStatus.SEND_STARTED;
+    }
+
     public void applyProviderReport(ProviderStatus status, String reportedTransactionKey) {
         if (method != Method.PG || result != Result.PENDING) {
             throw new RuleViolationException("결과가 정해진 결제 기록에는 PG 보고를 반영하지 않습니다.");
@@ -76,7 +84,7 @@ public final class PaymentRecord {
         }
         result = switch (status) {
             case SUCCESS -> Result.SUCCESS;
-            case FAILED, REJECTED_NO_EFFECT -> Result.FAILED;
+            case FAILED, REJECTED_NO_EFFECT, ALL_NOT_SENT -> Result.FAILED;
             case SEND_STARTED, NOT_SENT, PENDING, UNKNOWN -> Result.PENDING;
         };
     }

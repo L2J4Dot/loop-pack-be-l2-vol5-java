@@ -29,7 +29,7 @@ public class PaymentRecordPersistenceAdapter implements PaymentRecordRepository 
             entity = paymentRecordJpaRepository.findById(payment.getId()).orElseThrow();
         }
         entity.update(payment.getResult().name(), payment.getTransactionKey(),
-            payment.getProviderStatus() == null ? null : payment.getProviderStatus().name());
+            payment.getProviderStatus() == null ? null : payment.getProviderStatus().name(), payment.getProviderId());
         return toDomain(paymentRecordJpaRepository.save(entity));
     }
 

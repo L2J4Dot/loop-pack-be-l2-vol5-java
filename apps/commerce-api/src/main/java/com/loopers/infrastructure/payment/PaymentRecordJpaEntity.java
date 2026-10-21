@@ -28,7 +28,7 @@ public class PaymentRecordJpaEntity {
     private String result;
     @Column(updatable = false, length = 64)
     private String attemptKey;
-    @Column(updatable = false, length = 50)
+    @Column(length = 50)
     private String providerId;
     @Column(updatable = false, length = 50)
     private String providerOrderId;
@@ -49,7 +49,8 @@ public class PaymentRecordJpaEntity {
         this.providerOrderId = providerOrderId;
     }
 
-    void update(String result, String transactionKey, String providerStatus) {
+    void update(String result, String transactionKey, String providerStatus, String providerId) {
+        this.providerId = providerId;
         this.result = result;
         this.transactionKey = transactionKey;
         this.providerStatus = providerStatus;
