@@ -191,6 +191,20 @@ class PaymentVerificationApiIntegrationTest {
     }
 
     @Test
+    @DisplayName("CONFIRMED 주문에 저장 키와 다른 callback 키가 오면 영구 이상 한 행을 남기고 상태·재고를 유지한다")
+    void recordsCallbackKeyMismatchForConfirmedOrder() throws Exception {
+        start(CreateBehavior.ACCEPT_SUCCESS);
+
+        callback("FORGED-KEY", "SUCCESS", providerOrderId()).andExpect(status().isOk());
+
+        scene("CONFIRMED", 3, "SUCCESS", 1, 1, 1);
+        anomaly("CALLBACK_KEY_MISMATCH", 1, false);
+        assertThat(anomalyCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select transaction_key from payment_records where order_id = ?", String.class, orderId))
+            .isEqualTo(transactionKey());
+    }
+
+    @Test
     @DisplayName("거래 0건의 이상은 반복 누적 후 성공하면 해결되며 종결 뒤 0건 조회로 다시 열리지 않는다")
     void accumulatesAndResolvesNoTransaction() throws Exception {
         start(CreateBehavior.ERROR_500_WITHOUT_CREATE);
