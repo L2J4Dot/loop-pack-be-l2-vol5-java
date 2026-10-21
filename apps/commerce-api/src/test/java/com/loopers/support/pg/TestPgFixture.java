@@ -5,7 +5,6 @@ import com.loopers.application.order.ConfirmCommand;
 import com.loopers.application.payment.port.PaymentCreateCommand;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
-import com.loopers.application.payment.port.PaymentTransactionLookup;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import com.loopers.infrastructure.payment.TestPgPaymentGateway;
 import com.loopers.infrastructure.payment.TestPgProperties;
@@ -115,13 +114,8 @@ public class TestPgFixture {
         }
 
         @Override
-        public PaymentTransactionLookup findByTransactionKey(String transactionKey) {
-            return client().findByTransactionKey(transactionKey);
-        }
-
-        @Override
-        public PaymentTransactionsLookup findByOrderId(String providerOrderId) {
-            return client().findByOrderId(providerOrderId);
+        public PaymentTransactionsLookup verifyOrder(String providerOrderId, String storedTransactionKey) {
+            return client().verifyOrder(providerOrderId, storedTransactionKey);
         }
     }
 }

@@ -38,6 +38,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.client.ResourceAccessException;
 
@@ -315,6 +316,21 @@ class TestPgPaymentGatewayTest {
     @Nested
     @DisplayName("조회")
     class Lookup {
+        @ParameterizedTest(name = "거래 수={0}")
+        @ValueSource(ints = {0, 1, 2})
+        @DisplayName("주문 거래 확인은 저장 키와 무관하게 주문 거래 전체와 ALL 보증을 보고한다")
+        void verifiesAllOrderTransactions(int count) {
+            for (int index = 0; index < count; index++) {
+                server.addTransaction(ORDER_ID, AMOUNT, "SUCCESS");
+            }
+            PaymentTransactionsLookup result = gateway.verifyOrder(ORDER_ID, "TR-STORED");
+            assertThat(result).isInstanceOf(PaymentTransactionsLookup.Found.class);
+            PaymentTransactionsLookup.Found found = (PaymentTransactionsLookup.Found) result;
+            assertThat(found.transactions()).hasSize(count);
+            assertThat(found.coverage()).isEqualTo(PaymentTransactionsLookup.Coverage.ALL);
+            assertThat(server.lookupCalls()).isEqualTo(1);
+        }
+
         @Test
         @DisplayName("거래 키로 조회하면 200 거래를 그대로 돌려준다")
         void findsTransactionByKey() {
@@ -370,15 +386,27 @@ class TestPgPaymentGatewayTest {
 
         @ParameterizedTest(name = "{0}")
         @MethodSource("failures")
-        @DisplayName("5xx·timeout·해석할 수 없는 응답이면 조회 실패를 돌려준다")
+        @DisplayName("5xx·timeout·깨진 응답은 조회 실패이고 다른 주문 ID는 사실대로 보고한다")
         void returnsFailedForBrokenLookups(String name, LookupBehavior behavior, boolean byKey) {
             String key = server.addTransaction(ORDER_ID, AMOUNT, "SUCCESS");
             server.lookupBehavior(behavior);
 
             Object result = byKey ? gateway.findByTransactionKey(key) : gateway.findByOrderId(ORDER_ID);
 
-            assertThat(result).isInstanceOfAny(PaymentTransactionLookup.Failed.class, PaymentTransactionsLookup.Failed.class);
+            if (behavior == LookupBehavior.WRONG_ORDER_ID) {
+                assertThat(result).isInstanceOf(PaymentTransactionsLookup.Found.class);
+                PaymentTransactionsLookup.Found found = (PaymentTransactionsLookup.Found) result;
+                assertThat(found.transactions().get(0).providerOrderId()).isEqualTo(ORDER_ID + "-X");
+            } else {
+                assertThat(result).isInstanceOfAny(PaymentTransactionLookup.Failed.class, PaymentTransactionsLookup.Failed.class);
+            }
             assertThat(server.lookupCalls()).isEqualTo(1);
+            PaymentTransactionsLookup verified = gateway.verifyOrder(ORDER_ID, key);
+            if (behavior == LookupBehavior.WRONG_ORDER_ID) {
+                assertThat(verified).isInstanceOf(PaymentTransactionsLookup.Found.class);
+            } else {
+                assertThat(verified).isInstanceOf(PaymentTransactionsLookup.Failed.class);
+            }
         }
     }
 

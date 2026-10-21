@@ -109,6 +109,19 @@ public final class TestPgServer implements AutoCloseable {
         return store(orderId, amount, status).transactionKey();
     }
 
+    public void changeStatus(String key, String status) {
+        StoredTransaction current = transactions.get(key);
+        replaceTransaction(key, current.orderId(), current.amount(), status);
+    }
+
+    public void removeTransaction(String key) {
+        transactions.remove(key);
+    }
+
+    public void replaceTransaction(String key, String orderId, long amount, String status) {
+        transactions.put(key, new StoredTransaction(key, orderId, amount, status));
+    }
+
     public List<StoredTransaction> transactions() {
         return List.copyOf(transactions.values());
     }

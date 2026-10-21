@@ -9,7 +9,9 @@ public final class PaymentRecord {
 
     public enum Result { PENDING, SUCCESS, FAILED }
 
-    public enum ProviderStatus { SEND_STARTED, NOT_SENT, PENDING, SUCCESS, FAILED, REJECTED_NO_EFFECT, UNKNOWN, ALL_NOT_SENT }
+    public enum ProviderStatus {
+        SEND_STARTED, NOT_SENT, PENDING, SUCCESS, FAILED, REJECTED_NO_EFFECT, UNKNOWN, ALL_NOT_SENT, NEEDS_REVIEW
+    }
 
     private final Long id;
     private final long orderId;
@@ -74,6 +76,12 @@ public final class PaymentRecord {
         providerStatus = ProviderStatus.SEND_STARTED;
     }
 
+    public void requireReview() {
+        if (method == Method.PG && result == Result.PENDING) {
+            providerStatus = ProviderStatus.NEEDS_REVIEW;
+        }
+    }
+
     public void applyProviderReport(ProviderStatus status, String reportedTransactionKey) {
         if (method != Method.PG || result != Result.PENDING) {
             throw new RuleViolationException("결과가 정해진 결제 기록에는 PG 보고를 반영하지 않습니다.");
@@ -85,7 +93,7 @@ public final class PaymentRecord {
         result = switch (status) {
             case SUCCESS -> Result.SUCCESS;
             case FAILED, REJECTED_NO_EFFECT, ALL_NOT_SENT -> Result.FAILED;
-            case SEND_STARTED, NOT_SENT, PENDING, UNKNOWN -> Result.PENDING;
+            case SEND_STARTED, NOT_SENT, PENDING, UNKNOWN, NEEDS_REVIEW -> Result.PENDING;
         };
     }
 

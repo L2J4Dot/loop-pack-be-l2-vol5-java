@@ -8,7 +8,5 @@ public interface PaymentGateway {
     // PG가 멱등 키를 받지 않으므로 한 번만 보낸다. 결과를 모르면 Unknown을 돌려주고 다시 보내지 않는다.
     PaymentCreateResult create(PaymentCreateCommand command);
 
-    PaymentTransactionLookup findByTransactionKey(String transactionKey);
-
-    PaymentTransactionsLookup findByOrderId(String providerOrderId);
+    PaymentTransactionsLookup verifyOrder(String providerOrderId, String storedTransactionKey);
 }

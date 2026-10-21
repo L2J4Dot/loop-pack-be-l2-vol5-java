@@ -104,7 +104,11 @@ public class TestPgPaymentGateway implements PaymentGateway {
     }
 
     @Override
-    public PaymentTransactionLookup findByTransactionKey(String transactionKey) {
+    public PaymentTransactionsLookup verifyOrder(String providerOrderId, String storedTransactionKey) {
+        return findByOrderId(providerOrderId);
+    }
+
+    PaymentTransactionLookup findByTransactionKey(String transactionKey) {
         try {
             return restClient.get()
                 .uri(PAYMENTS_PATH + "/{transactionKey}", transactionKey)
@@ -130,8 +134,7 @@ public class TestPgPaymentGateway implements PaymentGateway {
         }
     }
 
-    @Override
-    public PaymentTransactionsLookup findByOrderId(String providerOrderId) {
+    PaymentTransactionsLookup findByOrderId(String providerOrderId) {
         try {
             return restClient.get()
                 .uri(uri -> uri.path(PAYMENTS_PATH).queryParam("orderId", "{orderId}").build(providerOrderId))
@@ -142,7 +145,7 @@ public class TestPgPaymentGateway implements PaymentGateway {
                         return listFailed("HTTP " + status);
                     }
                     return readTree(response.getBody().readAllBytes())
-                        .flatMap(node -> toTransactions(node, providerOrderId))
+                        .flatMap(this::toTransactions)
                         .<PaymentTransactionsLookup>map(PaymentTransactionsLookup.Found::new)
                         .orElseGet(() -> listFailed("응답 형식 오류"));
                 });
@@ -204,14 +207,13 @@ public class TestPgPaymentGateway implements PaymentGateway {
         return Optional.of(new PaymentTransaction(key.asText(), orderId.asText(), new Money(amount.get()), status.get()));
     }
 
-    private Optional<List<PaymentTransaction>> toTransactions(JsonNode node, String providerOrderId) {
+    private Optional<List<PaymentTransaction>> toTransactions(JsonNode node) {
         if (!node.isArray()) {
             return Optional.empty();
         }
         List<PaymentTransaction> transactions = new ArrayList<>();
         for (JsonNode element : node) {
-            Optional<PaymentTransaction> transaction = toTransaction(element)
-                .filter(candidate -> candidate.providerOrderId().equals(providerOrderId));
+            Optional<PaymentTransaction> transaction = toTransaction(element);
             if (transaction.isEmpty()) {
                 return Optional.empty();
             }

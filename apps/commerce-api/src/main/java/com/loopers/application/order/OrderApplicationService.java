@@ -2,10 +2,14 @@ package com.loopers.application.order;
 
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.port.PaymentAnomalyRepository;
+import com.loopers.application.payment.port.PaymentAnomalyRepository.Kind;
 import com.loopers.application.payment.port.PaymentCreateCommand;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
 import com.loopers.application.payment.port.PaymentRecordRepository;
+import com.loopers.application.payment.port.PaymentTransaction;
+import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import com.loopers.application.product.ProductNotFoundException;
 import com.loopers.application.product.port.ProductRepository;
 import com.loopers.domain.common.InvalidValueException;
@@ -16,9 +20,11 @@ import com.loopers.domain.order.Quantity;
 import com.loopers.domain.payment.PaymentRecord;
 import com.loopers.domain.product.Product;
 import com.loopers.domain.product.ProductId;
+import java.time.Clock;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -38,15 +44,19 @@ public class OrderApplicationService {
     private final PaymentRecordRepository paymentRecordRepository;
     private final PaymentGatewayRegistry paymentGatewayRegistry;
     private final TransactionTemplate transactionTemplate;
+    private final PaymentAnomalyRepository paymentAnomalyRepository;
+    private final Clock clock;
 
     public OrderApplicationService(OrderRepository orderRepository, ProductRepository productRepository,
         PaymentRecordRepository paymentRecordRepository, PaymentGatewayRegistry paymentGatewayRegistry,
-        TransactionTemplate transactionTemplate) {
+        TransactionTemplate transactionTemplate, PaymentAnomalyRepository paymentAnomalyRepository, Clock clock) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
         this.paymentRecordRepository = paymentRecordRepository;
         this.paymentGatewayRegistry = paymentGatewayRegistry;
         this.transactionTemplate = transactionTemplate;
+        this.paymentAnomalyRepository = paymentAnomalyRepository;
+        this.clock = clock;
     }
 
     public record ItemRequest(long productId, int quantity) { }
@@ -134,35 +144,127 @@ public class OrderApplicationService {
     public OrderResult applyPaymentResult(long orderId, PaymentReport report) {
         return transactionTemplate.execute(status -> {
             Order order = orderRepository.findByIdForUpdate(orderId).orElseThrow(OrderNotFoundException::new);
-            Optional<PaymentRecord> found = paymentRecordRepository.findByOrderId(orderId);
-            if (found.isEmpty() || found.get().getMethod() != PaymentRecord.Method.PG) {
-                log.warn("PG 결제 기록이 없는 주문에 결제 결과가 들어왔습니다. orderId={}, providerStatus={}", orderId, report.status());
-                return OrderResult.from(order, found);
+            return applyLocked(order, paymentRecordRepository.findByOrderId(orderId), report, false);
+        });
+    }
+
+    public void receivePaymentCallback(String providerOrderId, String callbackKey) {
+        Optional<PaymentRecord> found = paymentRecordRepository.findByProviderOrderId(providerOrderId);
+        if (found.isEmpty()) {
+            log.warn("알 수 없는 주문의 PG callback입니다.");
+            return;
+        }
+        PaymentRecord payment = found.get();
+        if (payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW) {
+            return;
+        }
+        verifyPayment(payment, false, callbackKey);
+    }
+
+    public OrderResult reconcilePayment(long orderId) {
+        orderRepository.findById(orderId).orElseThrow(OrderNotFoundException::new);
+        PaymentRecord payment = paymentRecordRepository.findByOrderId(orderId)
+            .filter(found -> found.getMethod() == PaymentRecord.Method.PG)
+            .orElseThrow(() -> new RuleViolationException("PG 결제가 아닌 주문은 조회 확정할 수 없습니다."));
+        return verifyPayment(payment, true, null);
+    }
+
+    private OrderResult verifyPayment(PaymentRecord requested, boolean manual, String callbackKey) {
+        // callback 본문은 누구나 보낼 수 있는 신호다. 저장된 값으로 잠금·트랜잭션 밖에서 PG를 조회한다.
+        PaymentTransactionsLookup lookup = paymentGatewayRegistry.get(requested.getProviderId())
+            .verifyOrder(requested.getProviderOrderId(), requested.getTransactionKey());
+        return transactionTemplate.execute(status -> {
+            Order order = orderRepository.findByIdForUpdate(requested.getOrderId()).orElseThrow(OrderNotFoundException::new);
+            PaymentRecord payment = paymentRecordRepository.findByOrderId(order.getId()).orElseThrow();
+            if (!payment.getProviderId().equals(requested.getProviderId())
+                || (!manual && payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW)) {
+                return OrderResult.from(order, Optional.of(payment));
             }
-            PaymentRecord payment = found.get();
-            Order.PaymentTransition transition = order.applyPaymentOutcome(report.outcome());
-            switch (transition) {
-                case CHANGED -> {
-                    if (order.getStatus() == Order.Status.PAYMENT_FAILED) {
-                        returnReservedStock(order);
-                    }
-                    orderRepository.save(order);
+            if (!manual && !Objects.equals(payment.getTransactionKey(), callbackKey)) {
+                recordAnomaly(order.getId(), Kind.CALLBACK_KEY_MISMATCH, "storedKeyMatches=false");
+            }
+            if (lookup instanceof PaymentTransactionsLookup.Failed) {
+                recordAnomaly(order.getId(), Kind.LOOKUP_FAILED, "lookupFailed=true");
+                return OrderResult.from(order, Optional.of(payment));
+            }
+            PaymentTransactionsLookup.Found found = (PaymentTransactionsLookup.Found) lookup;
+            List<PaymentTransaction> transactions = found.transactions();
+            if (transactions.isEmpty()) {
+                // 0건은 효과 없음의 증거가 아니다. 저장 키가 있어도 재발송·실패 확정하지 않는다.
+                recordAnomaly(order.getId(), Kind.NO_TRANSACTION,
+                    "count=0, storedKeyPresent=" + (payment.getTransactionKey() != null));
+                return OrderResult.from(order, Optional.of(payment));
+            }
+            if (found.coverage() == PaymentTransactionsLookup.Coverage.ALL && transactions.size() > 1) {
+                return requireReview(order, payment, Kind.DUPLICATE_TRANSACTIONS, "count=" + transactions.size());
+            }
+            PaymentTransaction transaction = transactions.get(0);
+            boolean orderMatches = payment.getProviderOrderId().equals(transaction.providerOrderId());
+            boolean amountMatches = payment.getAmount().equals(transaction.amount());
+            boolean keyMatches = payment.getTransactionKey() == null
+                || payment.getTransactionKey().equals(transaction.transactionKey());
+            if (!orderMatches || !amountMatches || !keyMatches) {
+                return requireReview(order, payment, Kind.TRANSACTION_MISMATCH,
+                    "orderMatches=" + orderMatches + ", amountMatches=" + amountMatches + ", keyMatches=" + keyMatches);
+            }
+            PaymentReport report = new PaymentReport(PaymentRecord.ProviderStatus.valueOf(transaction.status().name()),
+                transaction.transactionKey());
+            return applyLocked(order, Optional.of(payment), report, manual);
+        });
+    }
+
+    private OrderResult requireReview(Order order, PaymentRecord payment, Kind kind, String summary) {
+        recordAnomaly(order.getId(), kind, summary);
+        payment.requireReview();
+        return OrderResult.from(order, Optional.of(paymentRecordRepository.save(payment)));
+    }
+
+    private OrderResult applyLocked(Order order, Optional<PaymentRecord> found, PaymentReport report, boolean manual) {
+        if (order.getStatus() == Order.Status.DRAFT) {
+            recordAnomaly(order.getId(), Kind.RESULT_BEFORE_PAYMENT, "status=" + report.status());
+            log.warn("결제를 시작하지 않은 주문에 결제 결과가 들어왔습니다. orderId={}, providerStatus={}",
+                order.getId(), report.status());
+            return OrderResult.from(order, found);
+        }
+        if (found.isEmpty() || found.get().getMethod() != PaymentRecord.Method.PG) {
+            log.warn("PG 결제 기록이 없는 주문에 결제 결과가 들어왔습니다. orderId={}, providerStatus={}", order.getId(), report.status());
+            return OrderResult.from(order, found);
+        }
+        PaymentRecord payment = found.get();
+        // 확인 필요는 수동 reconcile의 깨끗한 확정 결과만 해제한다. 미확정 보고는 키와 상태를 보존한다.
+        if (payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW
+            && (!manual || report.outcome() == Order.PaymentOutcome.UNKNOWN)) {
+            return OrderResult.from(order, found);
+        }
+        Order.PaymentTransition transition = order.applyPaymentOutcome(report.outcome());
+        switch (transition) {
+            case CHANGED -> {
+                if (order.getStatus() == Order.Status.PAYMENT_FAILED) {
+                    returnReservedStock(order);
+                }
+                orderRepository.save(order);
+                payment.applyProviderReport(report.status(), report.transactionKey());
+                payment = paymentRecordRepository.save(payment);
+                paymentAnomalyRepository.resolveTransient(order.getId(), clock.instant());
+            }
+            case UNCHANGED -> {
+                if (order.getStatus() == Order.Status.PAYMENT_PENDING) {
                     payment.applyProviderReport(report.status(), report.transactionKey());
                     payment = paymentRecordRepository.save(payment);
                 }
-                case UNCHANGED -> {
-                    if (order.getStatus() == Order.Status.PAYMENT_PENDING) {
-                        payment.applyProviderReport(report.status(), report.transactionKey());
-                        payment = paymentRecordRepository.save(payment);
-                    }
-                }
-                case CONFLICT -> log.warn("종결된 주문에 반대 결제 결과가 들어와 반영하지 않았습니다. orderId={}, status={}, providerStatus={}",
-                    orderId, order.getStatus(), report.status());
-                case ANOMALY -> log.warn("결제를 시작하지 않은 주문에 결제 결과가 들어왔습니다. orderId={}, providerStatus={}",
-                    orderId, report.status());
             }
-            return OrderResult.from(order, Optional.of(payment));
-        });
+            case CONFLICT -> {
+                recordAnomaly(order.getId(), Kind.CONFLICTING_RESULT, "status=" + report.status());
+                log.warn("종결된 주문에 반대 결제 결과가 들어와 반영하지 않았습니다. orderId={}, status={}, providerStatus={}",
+                    order.getId(), order.getStatus(), report.status());
+            }
+            case ANOMALY -> throw new IllegalStateException("DRAFT 결과는 앞에서 처리해야 합니다.");
+        }
+        return OrderResult.from(order, Optional.of(payment));
+    }
+
+    private void recordAnomaly(long orderId, Kind kind, String summary) {
+        paymentAnomalyRepository.record(orderId, kind, summary, clock.instant());
     }
 
     // 트랜잭션 A. 주문 잠금 → 본인·상태·시도 키 확인 → 상품 ID 오름차순 잠금·재고 확보 → 결제 기록(발송 시작) → 결제 대기.

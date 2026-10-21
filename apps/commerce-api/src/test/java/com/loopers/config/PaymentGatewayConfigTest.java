@@ -4,7 +4,6 @@ import com.loopers.application.payment.PaymentGatewayRegistry;
 import com.loopers.application.payment.port.PaymentCreateCommand;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
-import com.loopers.application.payment.port.PaymentTransactionLookup;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -66,12 +65,7 @@ class PaymentGatewayConfigTest {
         }
 
         @Override
-        public PaymentTransactionLookup findByTransactionKey(String transactionKey) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public PaymentTransactionsLookup findByOrderId(String providerOrderId) {
+        public PaymentTransactionsLookup verifyOrder(String providerOrderId, String storedTransactionKey) {
             throw new UnsupportedOperationException();
         }
     }

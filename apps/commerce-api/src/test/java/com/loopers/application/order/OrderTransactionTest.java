@@ -3,6 +3,7 @@ package com.loopers.application.order;
 import com.loopers.application.brand.BrandApplicationService;
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.port.PaymentAnomalyRepository;
 import com.loopers.application.payment.port.PaymentRecordRepository;
 import com.loopers.application.point.PointApplicationService;
 import com.loopers.application.product.ProductApplicationService;
@@ -18,6 +19,7 @@ import com.loopers.infrastructure.user.UserJpaRepository;
 import com.loopers.support.pg.TestPgFixture;
 import com.loopers.utils.DatabaseCleanUp;
 import jakarta.persistence.EntityManager;
+import java.time.Clock;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +45,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -57,6 +61,12 @@ class OrderTransactionTest {
 
     @Autowired
     private MockMvc mvc;
+
+    @Autowired
+    private PaymentAnomalyRepository paymentAnomalyRepository;
+
+    @Autowired
+    private Clock clock;
 
     @Autowired
     private BrandApplicationService brandApplicationService;
@@ -174,6 +184,18 @@ class OrderTransactionTest {
         assertState("PAYMENT_PENDING", 3, 4, 1);
         assertThat(paymentRecord()).containsEntry("result", "PENDING").containsEntry("provider_status", "SEND_STARTED");
         assertThat(server.transactions()).extracting(TestPgServer.StoredTransaction::status).containsExactly("SUCCESS");
+
+        for (int index = 0; index < 2; index++) {
+            mvc.perform(post("/api-admin/v1/orders/{id}/payment/reconcile", orderId)
+                    .with(csrf()).with(user("admin").roles("ADMIN")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("CONFIRMED"));
+            assertState("CONFIRMED", 3, 4, 1);
+            assertThat(paymentRecord()).containsEntry("result", "SUCCESS").containsEntry("provider_status", "SUCCESS");
+            assertThat(server.transactions()).hasSize(1);
+            assertThat(server.lookupCalls()).isEqualTo(index + 1);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from payment_anomalies", Long.class)).isZero();
+        }
     }
 
     @Test
@@ -191,7 +213,7 @@ class OrderTransactionTest {
         OrderApplicationService restarted = new OrderApplicationService(failingOrderRepository, productRepository,
             failingPaymentRecordRepository,
             new PaymentGatewayRegistry(List.of(testPgFixture.newClient()), List.of(TestPgFixture.PROVIDER_ID)),
-            transactionTemplate);
+            transactionTemplate, paymentAnomalyRepository, clock);
         OrderResult afterRestart = restarted.confirm(1, orderId, TestPgFixture.command(attemptKey));
 
         assertThat(afterRestart.status()).isEqualTo("PAYMENT_PENDING");
@@ -347,6 +369,11 @@ class OrderTransactionTest {
         @Override
         public List<PaymentRecord> findByOrderIds(Collection<Long> orderIds) {
             return delegate.findByOrderIds(orderIds);
+        }
+
+        @Override
+        public Optional<PaymentRecord> findByProviderOrderId(String providerOrderId) {
+            return delegate.findByProviderOrderId(providerOrderId);
         }
 
         @Override

@@ -1,9 +1,14 @@
 package com.loopers.architecture;
 
 import com.loopers.application.payment.PaymentGatewayRegistry;
+import com.loopers.application.payment.port.PaymentAnomalyRepository;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
+import com.loopers.application.payment.port.PaymentTransactionsLookup;
+import com.loopers.infrastructure.payment.PaymentAnomalyJpaEntity;
+import com.loopers.infrastructure.payment.PaymentAnomalyPersistenceAdapter;
 import com.loopers.infrastructure.payment.TestPgPaymentGateway;
+import com.loopers.interfaces.api.payment.PaymentCallbackController;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
@@ -79,6 +84,11 @@ class ArchitectureTest {
         assertThat(application.contain(PaymentCreateResult.Unknown.class)).isTrue();
         assertThat(application.contain(PaymentGatewayRegistry.class)).isTrue();
         assertThat(infrastructure.contain(TestPgPaymentGateway.class)).isTrue();
+        assertThat(application.contain(PaymentAnomalyRepository.class)).isTrue();
+        assertThat(application.contain(PaymentTransactionsLookup.class)).isTrue();
+        assertThat(infrastructure.contain(PaymentAnomalyJpaEntity.class)).isTrue();
+        assertThat(infrastructure.contain(PaymentAnomalyPersistenceAdapter.class)).isTrue();
+        assertThat(CLASSES.contain(PaymentCallbackController.class)).isTrue();
     }
 
     private static boolean isLegacyExample(String packageName) {

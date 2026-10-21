@@ -10,5 +10,7 @@ public interface PaymentRecordJpaRepository extends JpaRepository<PaymentRecordJ
 
     List<PaymentRecordJpaEntity> findByOrderIdIn(Collection<Long> orderIds);
 
+    Optional<PaymentRecordJpaEntity> findByProviderOrderId(String providerOrderId);
+
     Optional<PaymentRecordJpaEntity> findByAttemptKey(String attemptKey);
 }

@@ -47,6 +47,11 @@ public class PaymentRecordPersistenceAdapter implements PaymentRecordRepository 
     }
 
     @Override
+    public Optional<PaymentRecord> findByProviderOrderId(String providerOrderId) {
+        return paymentRecordJpaRepository.findByProviderOrderId(providerOrderId).map(this::toDomain);
+    }
+
+    @Override
     public Optional<PaymentRecord> findByAttemptKey(String attemptKey) {
         return paymentRecordJpaRepository.findByAttemptKey(attemptKey).map(this::toDomain);
     }

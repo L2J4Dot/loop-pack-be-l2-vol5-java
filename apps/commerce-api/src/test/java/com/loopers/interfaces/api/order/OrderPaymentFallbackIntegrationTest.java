@@ -7,7 +7,6 @@ import com.loopers.application.payment.PaymentGatewayRegistry;
 import com.loopers.application.payment.port.PaymentCreateCommand;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
-import com.loopers.application.payment.port.PaymentTransactionLookup;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import com.loopers.application.product.ProductApplicationService;
 import com.loopers.infrastructure.payment.TestPgPaymentGateway;
@@ -38,6 +37,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -109,6 +110,27 @@ class OrderPaymentFallbackIntegrationTest {
         sub.createBehavior(CreateBehavior.ACCEPT_SUCCESS);
         confirm().andExpect(status().isOk()).andExpect(jsonPath("$.data.status").value("CONFIRMED"));
         scene("CONFIRMED", 3, "sub", "SUCCESS", 0, 1, 0, 1);
+    }
+
+    @Test
+    @DisplayName("sub 전환 후 callback과 관리자 재조회는 결제 기록의 sub만 조회하고 create를 추가하지 않는다")
+    void verifiesCurrentProviderAfterSwitch() throws Exception {
+        closeMain();
+        sub.createBehavior(CreateBehavior.ACCEPT_PENDING);
+        confirm().andExpect(status().isAccepted());
+        String transactionKey = sub.transactions().get(0).transactionKey();
+        sub.changeStatus(transactionKey, "SUCCESS");
+        mvc.perform(post("/api/v1/payments/callback").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"transactionKey\":\"" + transactionKey + "\",\"orderId\":\""
+                    + String.format("LP-ORD-%010d", orderId) + "\",\"amount\":2000,\"status\":\"SUCCESS\"}"))
+            .andExpect(status().isOk());
+        mvc.perform(post("/api-admin/v1/orders/{id}/payment/reconcile", orderId)
+                .with(csrf()).with(user("admin").roles("ADMIN")))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.data.status").value("CONFIRMED"));
+        scene("CONFIRMED", 3, "sub", "SUCCESS", 0, 1, 0, 1);
+        assertThat(main.lookupCalls()).isZero();
+        assertThat(sub.lookupCalls()).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from payment_anomalies", Long.class)).isZero();
     }
 
     @Test
@@ -202,13 +224,8 @@ class OrderPaymentFallbackIntegrationTest {
         }
 
         @Override
-        public PaymentTransactionLookup findByTransactionKey(String transactionKey) {
-            return delegate.findByTransactionKey(transactionKey);
-        }
-
-        @Override
-        public PaymentTransactionsLookup findByOrderId(String providerOrderId) {
-            return delegate.findByOrderId(providerOrderId);
+        public PaymentTransactionsLookup verifyOrder(String providerOrderId, String storedTransactionKey) {
+            return delegate.verifyOrder(providerOrderId, storedTransactionKey);
         }
     }
 }

@@ -3,7 +3,6 @@ package com.loopers.application.payment;
 import com.loopers.application.payment.port.PaymentCreateCommand;
 import com.loopers.application.payment.port.PaymentCreateResult;
 import com.loopers.application.payment.port.PaymentGateway;
-import com.loopers.application.payment.port.PaymentTransactionLookup;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import java.util.List;
 import java.util.stream.Stream;
@@ -77,12 +76,7 @@ class PaymentGatewayRegistryTest {
         }
 
         @Override
-        public PaymentTransactionLookup findByTransactionKey(String transactionKey) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public PaymentTransactionsLookup findByOrderId(String providerOrderId) {
+        public PaymentTransactionsLookup verifyOrder(String providerOrderId, String storedTransactionKey) {
             throw new UnsupportedOperationException();
         }
     }

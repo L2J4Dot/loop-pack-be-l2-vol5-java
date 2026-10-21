@@ -30,7 +30,7 @@ public record PaymentReport(PaymentRecord.ProviderStatus status, String transact
         return switch (status) {
             case SUCCESS -> Order.PaymentOutcome.SUCCEEDED;
             case FAILED, REJECTED_NO_EFFECT, ALL_NOT_SENT -> Order.PaymentOutcome.FAILED;
-            case SEND_STARTED, NOT_SENT, PENDING, UNKNOWN -> Order.PaymentOutcome.UNKNOWN;
+            case SEND_STARTED, NOT_SENT, PENDING, UNKNOWN, NEEDS_REVIEW -> Order.PaymentOutcome.UNKNOWN;
         };
     }
 }
