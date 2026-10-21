@@ -807,7 +807,7 @@ flowchart LR
 
 - callback: `POST /api/v1/payments/callback`, 본문 `{transactionKey, orderId, amount, status}`. 본문은 신호일 뿐 status·금액·키를 결제 결과에 반영하지 않는다. providerOrderId로 결제 기록을 찾고 저장된 providerId·providerOrderId·거래 키로 PG를 조회한다.
 - 처리 순서: 결제 기록 찾기 → 트랜잭션 밖·잠금 없이 PG 조회 → 결과 반영 경계. 확인 필요(`NEEDS_REVIEW`) 기록은 callback 조회에서 제외한다(D41).
-- callback 키와 저장 키가 다르면 `CALLBACK_KEY_MISMATCH` 이상만 기록하고 확인 필요로 바꾸지 않는다. 저장 키가 없어도 비교한다. 조회는 그대로 진행한다.
+- callback 키는 저장된 거래 키가 있으면 그 키와 비교한다. 저장 키가 없으면 조회 결과가 정확히 1건이고 주문 ID·금액이 일치할 때 그 거래 키와 비교한다. 비교 대상이 없으면(조회 실패·0건·2건 이상·불일치) 키 불일치 이상을 기록하지 않는다. 다르면 `CALLBACK_KEY_MISMATCH`(영구적)만 기록하고 확인 필요로 바꾸지 않으며 조회 결과 반영은 그대로 진행한다.
 - callback은 형식이 맞으면 조회 성공·실패와 무관하게 200. 모르는 orderId는 200 + WARN, 이상 테이블에는 쓰지 않는다. 본문 형식 오류는 400.
 - 관리자: `POST /api-admin/v1/orders/{orderId}/payment/reconcile`. 기존 관리자 보안 경계를 사용한다. 저장된 값으로 조회 → 결과 반영 경계이며 확인 필요도 처리한다. 응답은 관리자 주문 조회와 같은 모양 200, 없는 주문 404, PG 결제가 아닌 주문 409.
 - 조회 결과와 create 보고는 `OrderApplicationService`의 결과 반영 경계에서 공통 내부 반영 메서드를 재사용한다. 트랜잭션 하나, 주문 → 상품 ID 오름차순 잠금, PG 호출은 그 밖을 지킨다.
@@ -821,10 +821,15 @@ flowchart LR
 | 1건, 주문 ID·금액·저장 키(있다면) 일치 | PENDING: 유지·키 저장 / SUCCESS: CONFIRMED / FAILED: 결제 실패·재고 반환 1회 | 없음 |
 | 1건 불일치 | 결제 대기·`NEEDS_REVIEW`, 거래 키 유지 | `TRANSACTION_MISMATCH` (영구적) |
 | 2건 이상, 보증 ALL | 결제 대기·`NEEDS_REVIEW`, 거래 키 유지 | `DUPLICATE_TRANSACTIONS` (영구적) |
+| 2건 이상, 보증 SINGLE | 결제 대기·`NEEDS_REVIEW`, 거래 키 유지 | `COVERAGE_CONTRACT_VIOLATION` (영구적) |
 
-보증 SINGLE은 그 주문 거래 전부를 확인한 것이 아니므로 중복 여부를 판단하지 않는다. 종결 주문에 반대 결과는 상태를 덮어쓰지 않고 `CONFLICTING_RESULT`(영구적), DRAFT에 결과는 변화 없이 `RESULT_BEFORE_PAYMENT`(영구적)로 기록하며 WARN 로그도 유지한다.
+보증 SINGLE은 그 주문 거래 전부를 확인한 것이 아니므로 전체 거래의 중복 여부를 판단하지 않는다. 다만 SINGLE로 2건 이상을 보고하면 보증 계약 위반으로 격리한다. `PaymentTransactionsLookup.Found`는 보증 수준을 항상 명시하며 기본값 ALL 보조 생성자는 두지 않는다. 종결 주문에 반대 결과는 상태를 덮어쓰지 않고 `CONFLICTING_RESULT`(영구적), DRAFT에 결과는 변화 없이 `RESULT_BEFORE_PAYMENT`(영구적)로 기록하며 WARN 로그도 유지한다.
+
+주문이 결제 대기가 아니면 조회 실패·0건은 이상 테이블에 쓰지 않고 INFO 로그만 남긴다. 종결 주문의 반대 결과와 callback 키 불일치는 기존 영구 이상 기록 규칙을 유지한다.
 
 확인 필요는 주문 상태가 아니라 결제 기록 PG 상태다. PENDING·결과 모름·조회 실패는 확인 필요를 지우지 않는다. **수동 reconcile이 일치하는 확정 성공·실패를 얻었을 때만** 확인 필요에서 벗어난다. callback 키 불일치 이상은 영구적이며 자동 해결하지 않는다.
+
+test-pg 어댑터는 조회 응답의 다른 orderId 거래도 걸러내지 않고 사실대로 보고하며, 애플리케이션이 불일치·중복으로 해석한다.
 
 ### 이상 기록
 
@@ -834,3 +839,8 @@ flowchart LR
 - 시각은 주입한 `Clock`을 사용한다. PG 요약에는 카드 번호·원문 응답을 담지 않고 상태·건수·일치 여부만 담는다.
 
 스케줄러·자동 재조회·backoff·서킷 브레이커·이상 해결 API·주문 결제 열 삭제·토스 어댑터는 범위 밖이다.
+
+
+### 한계
+
+모든 PG 미발송 뒤 트랜잭션 B 저장이 실패하거나 서브 PG 전환 저장이 실패하면, "모든 PG 미발송" 사실이 남지 않아 결제 실패로 확정할 수 없다. 결제 대기 → 재조회 0건 → 4단계 한도 후 확인 필요로 간다. 이중 결제는 없고 재고만 묶인다. 4단계 한도 처리는 이번 구현 범위가 아니다.
