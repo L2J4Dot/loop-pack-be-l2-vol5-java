@@ -24,7 +24,6 @@ import java.time.Clock;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -180,8 +179,8 @@ public class OrderApplicationService {
                 || (!manual && payment.getProviderStatus() == PaymentRecord.ProviderStatus.NEEDS_REVIEW)) {
                 return OrderResult.from(order, Optional.of(payment));
             }
-            if (!manual && !Objects.equals(payment.getTransactionKey(), callbackKey)) {
-                recordAnomaly(order.getId(), Kind.CALLBACK_KEY_MISMATCH, "storedKeyMatches=false");
+            if (!manual) {
+                recordCallbackKeyMismatch(order.getId(), payment.getTransactionKey(), callbackKey);
             }
             if (lookup instanceof PaymentTransactionsLookup.Failed) {
                 recordAnomaly(order.getId(), Kind.LOOKUP_FAILED, "lookupFailed=true");
@@ -207,10 +206,20 @@ public class OrderApplicationService {
                 return requireReview(order, payment, Kind.TRANSACTION_MISMATCH,
                     "orderMatches=" + orderMatches + ", amountMatches=" + amountMatches + ", keyMatches=" + keyMatches);
             }
+            if (!manual && payment.getTransactionKey() == null && transactions.size() == 1) {
+                // 저장 키가 없으면 주문 ID·금액이 일치하는 단일 조회 거래만 비교 근거로 쓴다.
+                recordCallbackKeyMismatch(order.getId(), transaction.transactionKey(), callbackKey);
+            }
             PaymentReport report = new PaymentReport(PaymentRecord.ProviderStatus.valueOf(transaction.status().name()),
                 transaction.transactionKey());
             return applyLocked(order, Optional.of(payment), report, manual);
         });
+    }
+
+    private void recordCallbackKeyMismatch(long orderId, String comparisonKey, String callbackKey) {
+        if (comparisonKey != null && !comparisonKey.equals(callbackKey)) {
+            recordAnomaly(orderId, Kind.CALLBACK_KEY_MISMATCH, "comparisonKeyMatches=false");
+        }
     }
 
     private OrderResult requireReview(Order order, PaymentRecord payment, Kind kind, String summary) {

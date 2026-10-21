@@ -99,7 +99,65 @@ class PaymentVerificationApiIntegrationTest {
         server.changeStatus(transactionKey(), "SUCCESS");
         callback("SUCCESS").andExpect(status().isOk());
         scene("CONFIRMED", 3, "SUCCESS", 1, 1, 1);
+        assertThat(anomalyCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("저장 키가 없어도 조회한 일치 거래 키와 callback 키가 다르면 영구 이상만 남기고 성공을 반영한다")
+    void comparesCallbackWithVerifiedKeyWhenStoredKeyMissing() throws Exception {
+        start(CreateBehavior.DELAY_AFTER_CREATE);
+        server.changeStatus(transactionKey(), "SUCCESS");
+
+        callback("FORGED-KEY", "SUCCESS", providerOrderId()).andExpect(status().isOk());
+
+        scene("CONFIRMED", 3, "SUCCESS", 1, 1, 1);
         anomaly("CALLBACK_KEY_MISMATCH", 1, false);
+        assertThat(anomalyCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select transaction_key from payment_records where order_id = ?", String.class, orderId))
+            .isEqualTo(transactionKey());
+    }
+
+    @ParameterizedTest(name = "저장 키 없는 조회 결과={0}")
+    @ValueSource(strings = {"FAILED", "EMPTY", "MULTIPLE", "MISMATCH"})
+    @DisplayName("저장 키와 검증된 단일 거래가 없으면 callback 키 불일치 이상을 남기지 않는다")
+    void doesNotCompareCallbackWithoutReliableKey(String outcome) throws Exception {
+        start(CreateBehavior.ERROR_500_WITHOUT_CREATE);
+        String expectedKind;
+        String expectedStatus;
+        int transactions;
+        switch (outcome) {
+            case "FAILED" -> {
+                server.lookupBehavior(LookupBehavior.ERROR_500);
+                expectedKind = "LOOKUP_FAILED";
+                expectedStatus = "UNKNOWN";
+                transactions = 0;
+            }
+            case "EMPTY" -> {
+                expectedKind = "NO_TRANSACTION";
+                expectedStatus = "UNKNOWN";
+                transactions = 0;
+            }
+            case "MULTIPLE" -> {
+                server.addTransaction(providerOrderId(), 2000, "SUCCESS");
+                server.addTransaction(providerOrderId(), 2000, "SUCCESS");
+                expectedKind = "DUPLICATE_TRANSACTIONS";
+                expectedStatus = "NEEDS_REVIEW";
+                transactions = 2;
+            }
+            case "MISMATCH" -> {
+                server.addTransaction(providerOrderId(), 999, "SUCCESS");
+                expectedKind = "TRANSACTION_MISMATCH";
+                expectedStatus = "NEEDS_REVIEW";
+                transactions = 1;
+            }
+            default -> throw new IllegalArgumentException(outcome);
+        }
+
+        callback("UNVERIFIED-KEY", "SUCCESS", providerOrderId()).andExpect(status().isOk());
+
+        scene("PAYMENT_PENDING", 3, expectedStatus, transactions, 1, 1);
+        anomaly(expectedKind, 1, false);
+        assertThat(anomalyCount()).isEqualTo(1);
     }
 
     @Test
