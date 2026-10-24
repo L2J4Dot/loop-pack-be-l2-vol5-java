@@ -42,7 +42,7 @@ payment:
     test-pg:
       base-url: http://localhost:8082
       user-id: "135135" # 테스트 PG 제공자 계정
-      callback-url: http://localhost:8080/api/v1/payments/callback # callback 수신은 다음 단계에서 구현
+      callback-url: http://localhost:8080/api/v1/payments/callback
       connect-timeout: 1s
       read-timeout: 3s
 
