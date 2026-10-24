@@ -53,7 +53,7 @@ class OrderTest {
         assertThat(order.getStatus()).isEqualTo(Order.Status.PAYMENT_PENDING);
         assertThatThrownBy(order::startPayment).isInstanceOf(IllegalStateException.class);
         assertThat(order.getStatus()).isEqualTo(Order.Status.PAYMENT_PENDING);
-        for (Order.Status closed : List.of(Order.Status.CONFIRMED, Order.Status.PAYMENT_FAILED)) {
+        for (Order.Status closed : List.of(Order.Status.CONFIRMED, Order.Status.PAYMENT_FAILED, Order.Status.PAYMENT_EXPIRED)) {
             Order restored = Order.restore(1, 1, List.of(item(1, 1, 1000)), closed);
             assertThatThrownBy(restored::startPayment).isInstanceOf(IllegalStateException.class);
             assertThat(restored.getStatus()).isEqualTo(closed);
@@ -73,7 +73,10 @@ class OrderTest {
         "CONFIRMED, UNKNOWN, UNCHANGED, CONFIRMED",
         "PAYMENT_FAILED, SUCCEEDED, CONFLICT, PAYMENT_FAILED",
         "PAYMENT_FAILED, FAILED, UNCHANGED, PAYMENT_FAILED",
-        "PAYMENT_FAILED, UNKNOWN, UNCHANGED, PAYMENT_FAILED"
+        "PAYMENT_FAILED, UNKNOWN, UNCHANGED, PAYMENT_FAILED",
+        "PAYMENT_EXPIRED, SUCCEEDED, CONFLICT, PAYMENT_EXPIRED",
+        "PAYMENT_EXPIRED, FAILED, UNCHANGED, PAYMENT_EXPIRED",
+        "PAYMENT_EXPIRED, UNKNOWN, UNCHANGED, PAYMENT_EXPIRED"
     })
     @DisplayName("결제 결과 반영은 결제 대기 주문만 바꾸고 다른 상태는 덮어쓰지 않는다(설계 23절 상태 전이 표)")
     void appliesPaymentOutcomeByTransitionTable(Order.Status current, Order.PaymentOutcome outcome,
@@ -83,6 +86,24 @@ class OrderTest {
         Order.PaymentTransition transition = order.applyPaymentOutcome(outcome);
 
         assertThat(transition).isEqualTo(expectedTransition);
+        assertThat(order.getStatus()).isEqualTo(expectedStatus);
+    }
+
+    @ParameterizedTest(name = "{0} 주문 만료 → 전이={1}, 이후 상태 {2}")
+    @CsvSource({
+        "DRAFT, false, DRAFT",
+        "PAYMENT_PENDING, true, PAYMENT_EXPIRED",
+        "CONFIRMED, false, CONFIRMED",
+        "PAYMENT_FAILED, false, PAYMENT_FAILED",
+        "PAYMENT_EXPIRED, false, PAYMENT_EXPIRED"
+    })
+    @DisplayName("결제 만료는 결제 대기 주문만 결제 만료로 바꾸고 다른 상태는 그대로 둔다(설계 26절)")
+    void expiresOnlyPendingPayment(Order.Status current, boolean expectedChanged, Order.Status expectedStatus) {
+        Order order = Order.restore(1, 1, List.of(item(1, 1, 1000)), current);
+
+        boolean changed = order.expirePayment();
+
+        assertThat(changed).isEqualTo(expectedChanged);
         assertThat(order.getStatus()).isEqualTo(expectedStatus);
     }
 }

@@ -6,7 +6,7 @@ import com.loopers.domain.common.RuleViolationException;
 import java.util.List;
 
 public final class Order {
-    public enum Status { DRAFT, PAYMENT_PENDING, CONFIRMED, PAYMENT_FAILED }
+    public enum Status { DRAFT, PAYMENT_PENDING, CONFIRMED, PAYMENT_FAILED, PAYMENT_EXPIRED }
 
     public enum PaymentOutcome { SUCCEEDED, FAILED, UNKNOWN }
 
@@ -52,6 +52,7 @@ public final class Order {
     }
 
     // 결제 대기만 결과로 바뀐다. 종결된 주문은 늦게 온 반대 결과로 덮어쓰지 않고 충돌로 알린다(설계 23절 상태 전이 표).
+    // 만료 뒤 늦게 온 성공도 충돌이다. 재고는 이미 반환했으므로 사람이 환불한다(설계 26절).
     public PaymentTransition applyPaymentOutcome(PaymentOutcome outcome) {
         return switch (status) {
             case DRAFT -> PaymentTransition.ANOMALY;
@@ -68,7 +69,17 @@ public final class Order {
             };
             case CONFIRMED -> outcome == PaymentOutcome.FAILED ? PaymentTransition.CONFLICT : PaymentTransition.UNCHANGED;
             case PAYMENT_FAILED -> outcome == PaymentOutcome.SUCCEEDED ? PaymentTransition.CONFLICT : PaymentTransition.UNCHANGED;
+            case PAYMENT_EXPIRED ->
+                outcome == PaymentOutcome.SUCCEEDED ? PaymentTransition.CONFLICT : PaymentTransition.UNCHANGED;
         };
+    }
+
+    public boolean expirePayment() {
+        if (status != Status.PAYMENT_PENDING) {
+            return false;
+        }
+        status = Status.PAYMENT_EXPIRED;
+        return true;
     }
 
     public Long getId() {

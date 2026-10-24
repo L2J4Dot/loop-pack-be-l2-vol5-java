@@ -61,6 +61,8 @@ payment:
     scheduler:
       enabled: true
       fixed-delay: PT1S
+  expiry:
+    timeout: 2m # 설계 26절 [임시]. 결제 시작 후 이 시간이 지나도 결과 미확정이면 결제 만료·재고 반환
 
 springdoc:
   use-fqn: true

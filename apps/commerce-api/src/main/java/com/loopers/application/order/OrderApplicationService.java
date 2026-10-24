@@ -1,6 +1,7 @@
 package com.loopers.application.order;
 
 import com.loopers.application.order.port.OrderRepository;
+import com.loopers.application.payment.PaymentExpiryPolicy;
 import com.loopers.application.payment.PaymentGatewayRegistry;
 import com.loopers.application.payment.PaymentLookupNotCalledException;
 import com.loopers.application.payment.PaymentLookupPolicy;
@@ -51,11 +52,13 @@ public class OrderApplicationService {
     private final Clock clock;
     private final PaymentLookupScheduleRepository paymentLookupScheduleRepository;
     private final PaymentLookupPolicy paymentLookupPolicy;
+    private final PaymentExpiryPolicy paymentExpiryPolicy;
 
     public OrderApplicationService(OrderRepository orderRepository, ProductRepository productRepository,
         PaymentRecordRepository paymentRecordRepository, PaymentGatewayRegistry paymentGatewayRegistry,
         TransactionTemplate transactionTemplate, PaymentAnomalyRepository paymentAnomalyRepository, Clock clock,
-        PaymentLookupScheduleRepository paymentLookupScheduleRepository, PaymentLookupPolicy paymentLookupPolicy) {
+        PaymentLookupScheduleRepository paymentLookupScheduleRepository, PaymentLookupPolicy paymentLookupPolicy,
+        PaymentExpiryPolicy paymentExpiryPolicy) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
         this.paymentRecordRepository = paymentRecordRepository;
@@ -65,6 +68,7 @@ public class OrderApplicationService {
         this.clock = clock;
         this.paymentLookupScheduleRepository = paymentLookupScheduleRepository;
         this.paymentLookupPolicy = paymentLookupPolicy;
+        this.paymentExpiryPolicy = paymentExpiryPolicy;
     }
 
     public record ItemRequest(long productId, int quantity) { }
@@ -204,6 +208,36 @@ public class OrderApplicationService {
                 log.error("주문 자동 재조회 처리 실패. orderId={}, causeType={}", orderId, e.getClass().getSimpleName());
             }
         }
+    }
+
+    // 만료는 벽시계로만 판단한다. PG를 조회하지 않으므로 회로 열림·조회 실패와 무관하게 결제 대기에 상한을 둔다(설계 26절).
+    public void expireOverduePayments() {
+        Instant now = clock.instant();
+        List<Long> overdueOrders = paymentRecordRepository.findExpirable(now.minus(paymentExpiryPolicy.timeout()),
+            paymentLookupPolicy.batchSize());
+        for (long orderId : overdueOrders) {
+            try {
+                transactionTemplate.executeWithoutResult(status -> expireLocked(orderId, now));
+            } catch (RuntimeException e) {
+                log.error("결제 만료 처리 실패. orderId={}, causeType={}", orderId, e.getClass().getSimpleName());
+            }
+        }
+    }
+
+    // 결과 반영 경계와 같은 잠금 순서(주문 → 상품 ID 오름차순)다. 대상 조회 뒤 결과가 먼저 반영됐을 수 있어 잠금 아래 다시 판단한다.
+    private void expireLocked(long orderId, Instant now) {
+        Order order = orderRepository.findByIdForUpdate(orderId).orElseThrow(OrderNotFoundException::new);
+        PaymentRecord payment = paymentRecordRepository.findByOrderId(orderId).orElseThrow();
+        if (!payment.isExpiredAt(now, paymentExpiryPolicy.timeout()) || !order.expirePayment()) {
+            return;
+        }
+        returnReservedStock(order);
+        orderRepository.save(order);
+        payment.expire();
+        paymentRecordRepository.save(payment);
+        paymentAnomalyRepository.resolveTransient(orderId, now);
+        paymentLookupScheduleRepository.delete(orderId);
+        log.info("결제 대기 상한이 지나 주문을 결제 만료로 종결했습니다. orderId={}", orderId);
     }
 
     private OrderResult verifyPayment(PaymentRecord requested, PaymentSource source, String callbackKey) {
@@ -363,14 +397,15 @@ public class OrderApplicationService {
         order.startPayment();
         orderRepository.save(order);
         String providerId = paymentGatewayRegistry.inPriorityOrder().get(0).providerId();
+        Instant now = clock.instant();
         PaymentRecord payment;
         try {
-            payment = paymentRecordRepository.save(PaymentRecord.pgStarted(orderId, order.getTotal(), attemptKey, providerId));
+            payment = paymentRecordRepository.save(
+                PaymentRecord.pgStarted(orderId, order.getTotal(), attemptKey, providerId, now));
         } catch (DataIntegrityViolationException e) {
             // 같은 시도 키를 다른 주문이 동시에 쓴 경쟁. 사전 확인을 통과했어도 유일 제약이 막는다.
             throw new RuleViolationException("다른 주문에 사용한 결제 시도 키입니다.", e);
         }
-        Instant now = clock.instant();
         paymentLookupScheduleRepository.save(new Schedule(orderId, paymentLookupPolicy.nextAt(now, 0), 0, now, now));
         return new PaymentStart(null, payment);
     }
