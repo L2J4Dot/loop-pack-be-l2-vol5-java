@@ -26,9 +26,9 @@ public class PaymentLookupConfig {
 
     @Bean
     PaymentLookupPolicy paymentLookupPolicy(LookupJitter lookupJitter,
-        @Value("${payment.lookup.initial-delay:5s}") Duration initialDelay,
+        @Value("${payment.lookup.initial-delay:2s}") Duration initialDelay,
         @Value("${payment.lookup.multiplier:2}") int multiplier,
-        @Value("${payment.lookup.max-delay:1m}") Duration maxDelay,
+        @Value("${payment.lookup.max-delay:20s}") Duration maxDelay,
         @Value("${payment.lookup.max-attempts:12}") int maxAttempts,
         @Value("${payment.lookup.batch-size:100}") int batchSize) {
         return new PaymentLookupPolicy(new LookupBackoff(initialDelay, multiplier, maxDelay),

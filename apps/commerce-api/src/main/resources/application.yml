@@ -47,9 +47,9 @@ payment:
       read-timeout: 3s
 
   lookup:
-    initial-delay: 5s
+    initial-delay: 2s
     multiplier: 2
-    max-delay: 1m
+    max-delay: 20s
     max-attempts: 12
     batch-size: 100
     circuit:
