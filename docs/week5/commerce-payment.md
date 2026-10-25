@@ -914,7 +914,8 @@ PG 장애로 회로가 계속 열리면 한도가 줄지 않지만, 결제 대�
 - **확인 필요(`NEEDS_REVIEW`) 주문도 포함한다.** 재고는 시간 기준으로 일관되게 풀고, 결제 쪽 문제는 남아 있는 영구 이상 기록으로 사람이 처리한다.
 - **회로 열림 여부와 무관하다.** 벽시계만 보고 PG를 조회하지 않으며, 만료 판정은 PG 조회 결과에 의존하지 않는다.
 - 조회: `payment_records`의 (`result`, `started_at`) 인덱스 `idx_payment_records_result_started_at`으로 `result = 'PENDING' AND method = 'PG' AND started_at <= 지금 - 2분`을 시작 시각·주문 ID 순으로 최대 `payment.lookup.batch-size`건 읽는다.
-- `started_at` 열을 추가하기 전에 만든 결제 대기 기록은 시작 시각이 없어 만료 대상이 아니다(로컬·테스트는 스키마를 새로 만든다).
+- 스키마 반영: ddl-auto를 쓰지 않는 환경은 배포 전에 `src/main/resources/sql/add-payment-started-at.sql`을 실행한다(2026-10-25 사용자 승인). 열·인덱스가 없을 때만 추가해 다시 실행해도 안전하고, 기존 PG 결제 대기 중 스케줄 행이 있는 기록은 스케줄 `created_at`(트랜잭션 A의 같은 시각)으로 `started_at`을 채운다.
+- 스케줄 행이 이미 지워진 기존 결제 대기(확인 필요)는 시작 시각의 근거가 없어 비워 두며 만료 대상이 아니다. 남아 있는 영구 이상 기록으로 사람이 처리한다.
 
 ### 만료 처리
 
