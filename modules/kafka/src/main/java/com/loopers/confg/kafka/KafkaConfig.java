@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.EnableKafka;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
+import org.springframework.kafka.listener.CommonContainerStoppingErrorHandler;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.support.converter.BatchMessagingMessageConverter;
 import org.springframework.kafka.support.converter.ByteArrayJsonMessageConverter;
@@ -21,6 +22,7 @@ import java.util.Map;
 @EnableConfigurationProperties(KafkaProperties.class)
 public class KafkaConfig {
     public static final String BATCH_LISTENER = "BATCH_LISTENER_DEFAULT";
+    public static final String RECORD_LISTENER = "RECORD_LISTENER_DEFAULT";
 
     public static final int MAX_POLLING_SIZE = 3000; // read 3000 msg
     public static final int FETCH_MIN_BYTES = (1024 * 1024); // 1mb
@@ -70,6 +72,20 @@ public class KafkaConfig {
         factory.setBatchMessageConverter(new BatchMessagingMessageConverter(converter));
         factory.setConcurrency(3);
         factory.setBatchListener(true);
+        return factory;
+    }
+
+    @Bean(name = RECORD_LISTENER)
+    public ConcurrentKafkaListenerContainerFactory<Object, Object> defaultRecordListenerContainerFactory(
+            ConsumerFactory<Object, Object> consumerFactory
+    ) {
+        ConcurrentKafkaListenerContainerFactory<Object, Object> factory = new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(consumerFactory);
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+        // error handler 정책은 설계 문서 27절 [미결]. 실패 record를 건너뛰지 않도록 멈추는 쪽을 기본 후보로 둔다.
+        factory.setCommonErrorHandler(new CommonContainerStoppingErrorHandler());
+        factory.setConcurrency(1);
+        factory.setBatchListener(false);
         return factory;
     }
 }

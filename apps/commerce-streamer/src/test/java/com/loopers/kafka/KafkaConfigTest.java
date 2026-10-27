@@ -11,11 +11,16 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.listener.CommonContainerStoppingErrorHandler;
+import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
+import org.springframework.kafka.listener.ContainerProperties;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -28,6 +33,10 @@ class KafkaConfigTest {
 
     @Autowired
     private ConsumerFactory<Object, Object> consumerFactory;
+
+    @Autowired
+    @Qualifier(KafkaConfig.RECORD_LISTENER)
+    private ConcurrentKafkaListenerContainerFactory<Object, Object> recordListenerContainerFactory;
 
     @DisplayName("테스트 broker 주소")
     @Nested
@@ -67,6 +76,39 @@ class KafkaConfigTest {
                 .isEqualTo(StringDeserializer.class);
             assertThat(consumerConfig.getClass(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG))
                 .isEqualTo(ByteArrayDeserializer.class);
+        }
+    }
+
+    @DisplayName("record listener 팩토리")
+    @Nested
+    class RecordListener {
+
+        @DisplayName("한 번에 record 하나를 한 consumer로 받고 즉시 수동 commit하며 실패하면 컨테이너를 멈춘다")
+        @Test
+        void containerHandlesOneRecordAtATime() {
+            ConcurrentMessageListenerContainer<Object, Object> container =
+                recordListenerContainerFactory.createContainer("record-listener-config-check");
+
+            assertThat(recordListenerContainerFactory.isBatchListener()).isFalse();
+            assertThat(container.getConcurrency()).isEqualTo(1);
+            assertThat(container.getContainerProperties().getAckMode())
+                .isEqualTo(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+            assertThat(container.getCommonErrorHandler()).isInstanceOf(CommonContainerStoppingErrorHandler.class);
+        }
+
+        @DisplayName("consumer는 auto commit을 끄고 batch 팩토리의 1MiB·5초 fetch 대기를 물려받지 않는다")
+        @Test
+        void consumerKeepsAutoCommitOffWithoutBatchFetchWait() {
+            ConsumerConfig consumerConfig = new ConsumerConfig(
+                recordListenerContainerFactory.getConsumerFactory().getConfigurationProperties());
+
+            assertThat(consumerConfig.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG)).isFalse();
+            assertThat(consumerConfig.getClass(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG))
+                .isEqualTo(StringDeserializer.class);
+            assertThat(consumerConfig.getClass(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG))
+                .isEqualTo(ByteArrayDeserializer.class);
+            assertThat(consumerConfig.getInt(ConsumerConfig.FETCH_MIN_BYTES_CONFIG)).isEqualTo(1);
+            assertThat(consumerConfig.getInt(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG)).isEqualTo(500);
         }
     }
 }
