@@ -30,6 +30,8 @@ public class KafkaConfig {
     public static final int SESSION_TIMEOUT_MS = 60 * 1000; // session timeout = 1m
     public static final int HEARTBEAT_INTERVAL_MS = 20 * 1000; // heartbeat interval = 20s ( 1/3 of session_timeout )
     public static final int MAX_POLL_INTERVAL_MS = 2 * 60 * 1000; // max poll interval = 2m
+    public static final long RECORD_RETRY_INTERVAL_MS = 1000;
+    public static final long RECORD_RETRY_ATTEMPTS = 3;
 
     @Bean
     public ProducerFactory<Object, Object> producerFactory(KafkaProperties kafkaProperties) {

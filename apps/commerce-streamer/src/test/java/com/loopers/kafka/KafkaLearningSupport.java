@@ -19,30 +19,30 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 
-final class KafkaLearningSupport {
+public final class KafkaLearningSupport {
 
-    static final Duration DEADLINE = Duration.ofSeconds(30);
-    static final Duration POLL_TIMEOUT = Duration.ofMillis(100);
+    public static final Duration DEADLINE = Duration.ofSeconds(30);
+    public static final Duration POLL_TIMEOUT = Duration.ofMillis(100);
     private static final long ADMIN_TIMEOUT_SECONDS = 10;
 
     private KafkaLearningSupport() {
     }
 
-    static String uniqueName(String prefix) {
+    public static String uniqueName(String prefix) {
         return prefix + "-" + UUID.randomUUID();
     }
 
-    static Admin admin(String bootstrapServers) {
+    public static Admin admin(String bootstrapServers) {
         return Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers));
     }
 
-    static void createTopic(Admin admin, String topic, int partitions) throws Exception {
+    public static void createTopic(Admin admin, String topic, int partitions) throws Exception {
         admin.createTopics(List.of(new NewTopic(topic, partitions, (short) 1)))
             .all()
             .get(ADMIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
-    static KafkaProducer<String, String> producer(String bootstrapServers) {
+    public static KafkaProducer<String, String> producer(String bootstrapServers) {
         return new KafkaProducer<>(Map.of(
             ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers,
             ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class,
@@ -50,7 +50,7 @@ final class KafkaLearningSupport {
         ));
     }
 
-    static Map<String, Object> consumerConfig(
+    public static Map<String, Object> consumerConfig(
         String bootstrapServers,
         String groupId,
         String clientId,
@@ -68,11 +68,11 @@ final class KafkaLearningSupport {
         );
     }
 
-    static KafkaConsumer<String, String> consumer(Map<String, Object> config) {
+    public static KafkaConsumer<String, String> consumer(Map<String, Object> config) {
         return new KafkaConsumer<>(config);
     }
 
-    static Long committedOffset(Admin admin, String groupId, TopicPartition partition) throws Exception {
+    public static Long committedOffset(Admin admin, String groupId, TopicPartition partition) throws Exception {
         Map<TopicPartition, OffsetAndMetadata> offsets = admin.listConsumerGroupOffsets(groupId)
             .partitionsToOffsetAndMetadata()
             .get(ADMIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -84,7 +84,7 @@ final class KafkaLearningSupport {
     }
 
     // 배정·fetch는 poll 안에서 진행되므로 condition이 poll을 부르며 마감 시간까지 다시 확인한다.
-    static void awaitUntil(String description, BooleanSupplier condition) {
+    public static void awaitUntil(String description, BooleanSupplier condition) {
         Instant deadline = Instant.now().plus(DEADLINE);
         while (Instant.now().isBefore(deadline)) {
             if (condition.getAsBoolean()) {
@@ -94,7 +94,7 @@ final class KafkaLearningSupport {
         throw new AssertionError(DEADLINE.toSeconds() + "초 안에 도달하지 못함: " + description);
     }
 
-    static void closeAll(List<? extends AutoCloseable> closeables) {
+    public static void closeAll(List<? extends AutoCloseable> closeables) {
         IllegalStateException failure = null;
         for (AutoCloseable closeable : closeables) {
             try {

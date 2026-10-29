@@ -1,6 +1,7 @@
 package com.loopers.kafka;
 
 import com.loopers.confg.kafka.KafkaConfig;
+import com.loopers.confg.kafka.RetryThenStopErrorHandler;
 import com.loopers.testcontainers.KafkaTestContainersConfig;
 import java.util.Map;
 import org.apache.kafka.clients.CommonClientConfigs;
@@ -18,7 +19,6 @@ import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
-import org.springframework.kafka.listener.CommonContainerStoppingErrorHandler;
 import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
 import org.springframework.kafka.listener.ContainerProperties;
 
@@ -83,7 +83,7 @@ class KafkaConfigTest {
     @Nested
     class RecordListener {
 
-        @DisplayName("한 번에 record 하나를 한 consumer로 받고 즉시 수동 commit하며 실패하면 컨테이너를 멈춘다")
+        @DisplayName("한 번에 record 하나를 한 consumer로 받고 즉시 수동 commit하며 실패하면 재시도 후 컨테이너를 멈춘다")
         @Test
         void containerHandlesOneRecordAtATime() {
             ConcurrentMessageListenerContainer<Object, Object> container =
@@ -93,7 +93,7 @@ class KafkaConfigTest {
             assertThat(container.getConcurrency()).isEqualTo(1);
             assertThat(container.getContainerProperties().getAckMode())
                 .isEqualTo(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-            assertThat(container.getCommonErrorHandler()).isInstanceOf(CommonContainerStoppingErrorHandler.class);
+            assertThat(container.getCommonErrorHandler()).isInstanceOf(RetryThenStopErrorHandler.class);
         }
 
         @DisplayName("consumer는 auto commit을 끄고 batch 팩토리의 1MiB·5초 fetch 대기를 물려받지 않는다")
@@ -109,6 +109,8 @@ class KafkaConfigTest {
                 .isEqualTo(ByteArrayDeserializer.class);
             assertThat(consumerConfig.getInt(ConsumerConfig.FETCH_MIN_BYTES_CONFIG)).isEqualTo(1);
             assertThat(consumerConfig.getInt(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG)).isEqualTo(500);
+            assertThat(consumerConfig.getInt(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG))
+                .isGreaterThan(10 * (int) (KafkaConfig.RECORD_RETRY_INTERVAL_MS * KafkaConfig.RECORD_RETRY_ATTEMPTS));
         }
     }
 }
