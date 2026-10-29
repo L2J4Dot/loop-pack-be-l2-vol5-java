@@ -10,11 +10,11 @@ import org.apache.kafka.common.TopicPartition;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.listener.MessageListenerContainer;
 
-import static com.loopers.kafka.KafkaLearningSupport.admin;
-import static com.loopers.kafka.KafkaLearningSupport.awaitUntil;
-import static com.loopers.kafka.KafkaLearningSupport.closeAll;
-import static com.loopers.kafka.KafkaLearningSupport.committedOffset;
 import static com.loopers.kafka.KafkaLearningSupport.producer;
+import static com.loopers.kafka.test.KafkaTestSupport.admin;
+import static com.loopers.kafka.test.KafkaTestSupport.awaitUntil;
+import static com.loopers.kafka.test.KafkaTestSupport.closeAll;
+import static com.loopers.kafka.test.KafkaTestSupport.committedOffset;
 
 // 실제 listener 컨테이너를 관찰하고 테스트 record를 topic에 직접 넣는 도구. 공개 endpoint 없이 Kafka로만 이벤트를 보낸다.
 final class OrderEventsListenerFixture implements AutoCloseable {

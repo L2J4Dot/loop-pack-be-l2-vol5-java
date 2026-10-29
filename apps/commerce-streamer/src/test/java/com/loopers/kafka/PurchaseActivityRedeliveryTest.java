@@ -33,16 +33,16 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
-import static com.loopers.kafka.KafkaLearningSupport.POLL_TIMEOUT;
-import static com.loopers.kafka.KafkaLearningSupport.admin;
-import static com.loopers.kafka.KafkaLearningSupport.awaitUntil;
-import static com.loopers.kafka.KafkaLearningSupport.closeAll;
-import static com.loopers.kafka.KafkaLearningSupport.committedOffset;
 import static com.loopers.kafka.KafkaLearningSupport.consumer;
 import static com.loopers.kafka.KafkaLearningSupport.consumerConfig;
-import static com.loopers.kafka.KafkaLearningSupport.createTopic;
 import static com.loopers.kafka.KafkaLearningSupport.producer;
-import static com.loopers.kafka.KafkaLearningSupport.uniqueName;
+import static com.loopers.kafka.test.KafkaTestSupport.POLL_TIMEOUT;
+import static com.loopers.kafka.test.KafkaTestSupport.admin;
+import static com.loopers.kafka.test.KafkaTestSupport.awaitUntil;
+import static com.loopers.kafka.test.KafkaTestSupport.closeAll;
+import static com.loopers.kafka.test.KafkaTestSupport.committedOffset;
+import static com.loopers.kafka.test.KafkaTestSupport.createTopic;
+import static com.loopers.kafka.test.KafkaTestSupport.uniqueName;
 import static com.loopers.support.OrderConfirmedMessages.json;
 import static org.assertj.core.api.Assertions.assertThat;
 

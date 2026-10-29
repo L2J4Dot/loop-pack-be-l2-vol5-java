@@ -15,10 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.LockSupport;
-import java.util.function.BooleanSupplier;
 import org.apache.kafka.clients.admin.Admin;
-import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -37,6 +34,9 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.listener.MessageListenerContainer;
 
+import static com.loopers.kafka.test.KafkaTestSupport.admin;
+import static com.loopers.kafka.test.KafkaTestSupport.awaitUntil;
+import static com.loopers.kafka.test.KafkaTestSupport.committedOffset;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -56,7 +56,7 @@ class OrderEventRepublishIntegrationTest extends OrderEventsIntegrationSupport {
 
     @BeforeEach
     void prepareRequests() {
-        admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers));
+        admin = admin(bootstrapServers);
         requests = new KafkaProducer<>(Map.of(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers,
             ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class,
             ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class));
@@ -200,9 +200,7 @@ class OrderEventRepublishIntegrationTest extends OrderEventsIntegrationSupport {
     }
 
     private Long committed() throws Exception {
-        OffsetAndMetadata committed = admin.listConsumerGroupOffsets(REQUEST_GROUP).partitionsToOffsetAndMetadata()
-            .get(10, TimeUnit.SECONDS).get(REQUESTS);
-        return committed == null ? null : committed.offset();
+        return committedOffset(admin, REQUEST_GROUP, REQUESTS);
     }
 
     private void awaitCommitted(long expected) {
@@ -225,16 +223,5 @@ class OrderEventRepublishIntegrationTest extends OrderEventsIntegrationSupport {
     private double invalidCommands() {
         Counter counter = meterRegistry.find(INVALID_METRIC).counter();
         return counter == null ? 0 : counter.count();
-    }
-
-    private static void awaitUntil(String description, BooleanSupplier condition) {
-        Instant deadline = Instant.now().plus(OrderEventsProbe.DEADLINE);
-        while (Instant.now().isBefore(deadline)) {
-            if (condition.getAsBoolean()) {
-                return;
-            }
-            LockSupport.parkNanos(Duration.ofMillis(20).toNanos());
-        }
-        throw new AssertionError(OrderEventsProbe.DEADLINE.toSeconds() + "초 안에 도달하지 못함: " + description);
     }
 }

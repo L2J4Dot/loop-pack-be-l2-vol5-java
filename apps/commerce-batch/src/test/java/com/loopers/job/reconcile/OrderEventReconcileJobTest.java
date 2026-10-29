@@ -6,6 +6,7 @@ import com.loopers.batch.job.reconcile.OrderEventReconcileJobConfig;
 import com.loopers.batch.job.reconcile.ReconcileQueries;
 import com.loopers.job.reconcile.ReconcileTestConfig.FailingCommandTemplate;
 import com.loopers.job.reconcile.ReconcileTestConfig.MutableClock;
+import com.loopers.kafka.test.TopicReader;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -63,7 +64,7 @@ class OrderEventReconcileJobTest {
     @Autowired private MutableClock clock;
     @Autowired private FailingCommandTemplate failingCommands;
 
-    private CommandTopicProbe probe;
+    private TopicReader probe;
 
     @DynamicPropertySource
     static void commandTopic(DynamicPropertyRegistry registry) {
@@ -75,7 +76,7 @@ class OrderEventReconcileJobTest {
         new ResourceDatabasePopulator(new ClassPathResource("sql/reconcile-source-tables.sql")).execute(dataSource);
         clock.set(NOW);
         failingCommands.disarm();
-        probe = new CommandTopicProbe(bootstrapServers, TOPIC);
+        probe = new TopicReader(bootstrapServers, TOPIC);
     }
 
     @AfterEach
@@ -104,7 +105,7 @@ class OrderEventReconcileJobTest {
         JobExecution execution = run();
 
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
-        List<ConsumerRecord<String, String>> commands = probe.readFrom(from);
+        List<ConsumerRecord<String, String>> commands = probe.readThrough(from);
         assertThat(commands).extracting(ConsumerRecord::key).containsExactly(String.valueOf(first), String.valueOf(second));
         JsonNode command = JSON.readTree(commands.get(0).value());
         assertThat(command.path("commandType").asText()).isEqualTo("RepublishOrderConfirmed");
@@ -126,7 +127,7 @@ class OrderEventReconcileJobTest {
 
         run();
 
-        assertThat(probe.readFrom(from)).extracting(ConsumerRecord::key)
+        assertThat(probe.readThrough(from)).extracting(ConsumerRecord::key)
             .containsExactly(String.valueOf(a), String.valueOf(b), String.valueOf(c), String.valueOf(d));
     }
 
@@ -141,7 +142,7 @@ class OrderEventReconcileJobTest {
 
         run();
 
-        assertThat(probe.readFrom(from)).extracting(ConsumerRecord::key).containsExactly(String.valueOf(late));
+        assertThat(probe.readThrough(from)).extracting(ConsumerRecord::key).containsExactly(String.valueOf(late));
         assertThat(watermark()).containsEntry("at", utc(NOW.plusSeconds(10).minus(Duration.ofMinutes(5))));
     }
 
@@ -160,7 +161,7 @@ class OrderEventReconcileJobTest {
 
         assertThat(failed.getStatus()).isEqualTo(BatchStatus.FAILED);
         assertThat(watermark()).isEqualTo(Map.of("at", utc(NOW.minus(Duration.ofMinutes(18))), "orderId", o2));
-        assertThat(probe.readFrom(firstFrom)).extracting(ConsumerRecord::key)
+        assertThat(probe.readThrough(firstFrom)).extracting(ConsumerRecord::key)
             .contains(String.valueOf(o1), String.valueOf(o2)).doesNotContain(String.valueOf(o4), String.valueOf(o5));
 
         failingCommands.disarm();
@@ -169,7 +170,7 @@ class OrderEventReconcileJobTest {
         JobExecution retried = run();
 
         assertThat(retried.getStatus()).isEqualTo(BatchStatus.COMPLETED);
-        assertThat(probe.readFrom(secondFrom)).extracting(ConsumerRecord::key)
+        assertThat(probe.readThrough(secondFrom)).extracting(ConsumerRecord::key)
             .contains(String.valueOf(o3), String.valueOf(o4), String.valueOf(o5)).doesNotContain(String.valueOf(o1));
         assertThat(watermark()).containsEntry("at", utc(NOW.plusSeconds(1).minus(Duration.ofMinutes(5))));
     }
@@ -180,14 +181,14 @@ class OrderEventReconcileJobTest {
         long missing = order("CONFIRMED", NOW.minus(Duration.ofMinutes(10)));
         long firstFrom = probe.mark();
         run();
-        assertThat(probe.readFrom(firstFrom)).extracting(ConsumerRecord::key).containsExactly(String.valueOf(missing));
+        assertThat(probe.readThrough(firstFrom)).extracting(ConsumerRecord::key).containsExactly(String.valueOf(missing));
         clock.set(NOW.plusSeconds(1));
         long secondFrom = probe.mark();
 
         JobExecution second = run();
 
         assertThat(second.getStatus()).isEqualTo(BatchStatus.COMPLETED);
-        assertThat(probe.readFrom(secondFrom)).isEmpty();
+        assertThat(probe.readThrough(secondFrom)).isEmpty();
         assertThat(output.getAll())
             .contains("[대사 요약] 구간=[2026-10-29T00:54:00Z, 2026-10-29T00:55:01Z), 확정 주문=0건, 누락 orderId=[]");
         assertThat(output.getAll()).contains("[대사 요약] 구간=[1970-01-01T00:00:00Z, 2026-10-29T00:55:00Z), 확정 주문=1건, 누락 orderId=["
@@ -203,7 +204,7 @@ class OrderEventReconcileJobTest {
 
         JobExecution execution = run();
 
-        List<ConsumerRecord<String, String>> commands = probe.readFrom(from);
+        List<ConsumerRecord<String, String>> commands = probe.readThrough(from);
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
         assertThat(commands).singleElement().satisfies(command -> assertThat(command.key()).isEqualTo(String.valueOf(caseA)));
         System.out.println("[실험④ 3b 사례 A 복구·batch] orderId=" + caseA + ", 명령 record=(topic=" + commands.get(0).topic()

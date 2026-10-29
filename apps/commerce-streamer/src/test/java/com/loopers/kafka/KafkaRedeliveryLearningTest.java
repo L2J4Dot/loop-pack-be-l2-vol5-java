@@ -20,16 +20,16 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
-import static com.loopers.kafka.KafkaLearningSupport.POLL_TIMEOUT;
-import static com.loopers.kafka.KafkaLearningSupport.admin;
-import static com.loopers.kafka.KafkaLearningSupport.awaitUntil;
-import static com.loopers.kafka.KafkaLearningSupport.closeAll;
-import static com.loopers.kafka.KafkaLearningSupport.committedOffset;
 import static com.loopers.kafka.KafkaLearningSupport.consumer;
 import static com.loopers.kafka.KafkaLearningSupport.consumerConfig;
-import static com.loopers.kafka.KafkaLearningSupport.createTopic;
 import static com.loopers.kafka.KafkaLearningSupport.producer;
-import static com.loopers.kafka.KafkaLearningSupport.uniqueName;
+import static com.loopers.kafka.test.KafkaTestSupport.POLL_TIMEOUT;
+import static com.loopers.kafka.test.KafkaTestSupport.admin;
+import static com.loopers.kafka.test.KafkaTestSupport.awaitUntil;
+import static com.loopers.kafka.test.KafkaTestSupport.closeAll;
+import static com.loopers.kafka.test.KafkaTestSupport.committedOffset;
+import static com.loopers.kafka.test.KafkaTestSupport.createTopic;
+import static com.loopers.kafka.test.KafkaTestSupport.uniqueName;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringJUnitConfig(KafkaTestContainersConfig.class)
