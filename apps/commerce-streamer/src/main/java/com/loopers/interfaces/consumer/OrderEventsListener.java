@@ -31,11 +31,13 @@ public class OrderEventsListener {
     }
 
     // ack는 handler 트랜잭션 commit이 끝난 뒤에만 한다. 예외가 나면 ack 없이 error handler로 넘어간다.
+    // committed offset이 없을 때 latest면 그 전 이벤트가 영구 누락되므로 이 group만 earliest로 둔다. 재처리는 멱등 소비가 흡수한다.
     @KafkaListener(
         id = LISTENER_ID,
         topics = "${commerce.kafka.topics.order-events}",
         groupId = "purchase-activity",
-        containerFactory = KafkaConfig.RECORD_LISTENER
+        containerFactory = KafkaConfig.RECORD_LISTENER,
+        properties = "auto.offset.reset=earliest"
     )
     public void onOrderEvent(ConsumerRecord<String, byte[]> record, Acknowledgment acknowledgment) {
         EventSource source = new EventSource(record.topic(), record.partition(), record.offset(), payloadText(record.value()));

@@ -37,7 +37,7 @@ final class OrderEventsListenerFixture implements AutoCloseable {
         return container;
     }
 
-    // kafka.yml의 auto.offset.reset=latest라 배정 전에 보낸 record는 새 group이 읽지 않는다. 배정을 확인한 뒤 보낸다.
+    // offset reset 설정에 기대지 않고 배정이 끝난 뒤 보낸다. 설정이 바뀌어도 테스트가 타이밍 문제를 가리지 않게 하기 위해서다.
     void awaitAssigned() {
         awaitUntil("order-events listener 배정", () -> {
             Collection<TopicPartition> assigned = container.getAssignedPartitions();
