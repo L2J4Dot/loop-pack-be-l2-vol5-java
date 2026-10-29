@@ -3,6 +3,7 @@ package com.loopers.job.reconcile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.loopers.batch.job.reconcile.OrderEventReconcileJobConfig;
+import com.loopers.batch.job.reconcile.ReconcileQueries;
 import com.loopers.job.reconcile.ReconcileTestConfig.FailingCommandTemplate;
 import com.loopers.job.reconcile.ReconcileTestConfig.MutableClock;
 import java.time.Duration;
@@ -191,6 +192,40 @@ class OrderEventReconcileJobTest {
             .contains("[대사 요약] 구간=[2026-10-29T00:54:00Z, 2026-10-29T00:55:01Z), 확정 주문=0건, 누락 orderId=[]");
         assertThat(output.getAll()).contains("[대사 요약] 구간=[1970-01-01T00:00:00Z, 2026-10-29T00:55:00Z), 확정 주문=1건, 누락 orderId=["
             + missing + "], 명령 send=1건 성공");
+    }
+
+    @Test
+    @DisplayName("누락 주문 조회는 orders의 (status, confirmed_at) 인덱스로 구간을 고른다")
+    void missingOrderQueryUsesStatusConfirmedAtIndex() {
+        for (int minute = 1; minute <= 30; minute++) {
+            order("CONFIRMED", NOW.minus(Duration.ofMinutes(minute * 10L)));
+            order("PAYMENT_FAILED", null);
+            order("DRAFT", null);
+        }
+        jdbc.execute("analyze table orders");
+        String sql = "select o.id, o.confirmed_at from orders o where " + ReconcileQueries.MISSING_CONDITION
+            .replace(":toAt", "'2026-10-29 00:55:00'")
+            .replace(":fromAt", "'2026-10-29 00:00:00'")
+            .replace(":fromOrderId", "0")
+            + " order by o.confirmed_at, o.id limit 100";
+
+        List<Map<String, Object>> plan = jdbc.queryForList("explain " + sql);
+
+        System.out.println("[대사 EXPLAIN] " + plan);
+        assertThat(plan).filteredOn(row -> "o".equals(row.get("table")))
+            .singleElement().satisfies(row -> assertThat(row.get("key")).isEqualTo("idx_orders_status_confirmed_at"));
+    }
+
+    @Test
+    @DisplayName("reconcile_checkpoint 생성 스크립트는 다시 실행해도 오류 없이 이미 있는 워터마크를 지우지 않는다")
+    void checkpointScriptIsRerunnable() {
+        jdbc.update("insert into reconcile_checkpoint(name, watermark_confirmed_at, watermark_order_id, updated_at)"
+            + " values ('order-confirmed-republish', ?, 7, ?)", utc(NOW), utc(NOW));
+
+        new ResourceDatabasePopulator(new ClassPathResource("sql/create-reconcile-checkpoint.sql")).execute(dataSource);
+        new ResourceDatabasePopulator(new ClassPathResource("sql/create-reconcile-checkpoint.sql")).execute(dataSource);
+
+        assertThat(watermark()).isEqualTo(Map.of("at", utc(NOW), "orderId", 7L));
     }
 
     private JobExecution run() throws Exception {
