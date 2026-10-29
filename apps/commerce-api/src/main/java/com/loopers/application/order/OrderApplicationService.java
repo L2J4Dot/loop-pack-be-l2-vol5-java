@@ -442,6 +442,10 @@ public class OrderApplicationService {
             .toList();
     }
 
+    public RepublishResult republishConfirmed(long orderId) {
+        return RepublishResult.ORDER_NOT_FOUND;
+    }
+
     @Transactional(readOnly = true)
     public OrderResult getMyOrder(long userId, long orderId) {
         Order order = orderRepository.findById(orderId)

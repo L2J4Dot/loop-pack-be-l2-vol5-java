@@ -1,5 +1,6 @@
 package com.loopers.interfaces.api.order;
 
+import com.loopers.interfaces.consumer.RepublishRequestsListener;
 import java.util.Map;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -12,6 +13,7 @@ import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.core.KafkaTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 class OrderConfirmedProducerConfigTest extends OrderEventsIntegrationSupport {
     @Autowired private KafkaTemplate<String, String> orderEventsKafkaTemplate;
@@ -42,14 +44,14 @@ class OrderConfirmedProducerConfigTest extends OrderEventsIntegrationSupport {
         assertThat(defaults.getLong(ProducerConfig.MAX_BLOCK_MS_CONFIG)).isEqualTo(60_000L);
     }
 
+    // 3b에서 재발행 명령 consumer가 생겨 "listener 0개"에서 "명령 consumer 하나만"으로 바뀌었다(설계 27절 대사와 재발행).
     @Test
-    @DisplayName("commerce-api는 order-events topic을 설정한 partition 수·복제 1로 선언하고 Kafka listener(consumer)는 하나도 띄우지 않는다")
-    void declaresTopicWithoutListeners() {
-        assertThat(applicationContext.getBeansOfType(NewTopic.class).values()).singleElement().satisfies(topic -> {
-            assertThat(topic.name()).isEqualTo(TOPIC);
-            assertThat(topic.numPartitions()).isEqualTo(1);
-            assertThat(topic.replicationFactor()).isEqualTo((short) 1);
-        });
-        assertThat(kafkaListenerEndpointRegistry.getListenerContainers()).isEmpty();
+    @DisplayName("commerce-api는 order-events·재발행 명령 topic을 설정한 partition 수·복제 1로 선언하고 Kafka listener는 재발행 명령 consumer 하나만 띄운다")
+    void declaresTopicsWithOnlyRepublishListener() {
+        assertThat(applicationContext.getBeansOfType(NewTopic.class).values())
+            .extracting(NewTopic::name, NewTopic::numPartitions, NewTopic::replicationFactor)
+            .containsExactlyInAnyOrder(tuple(TOPIC, 1, (short) 1), tuple(REQUEST_TOPIC, 1, (short) 1));
+        assertThat(kafkaListenerEndpointRegistry.getListenerContainerIds())
+            .containsExactly(RepublishRequestsListener.LISTENER_ID);
     }
 }

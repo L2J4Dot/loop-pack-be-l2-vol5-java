@@ -46,6 +46,10 @@ public class KafkaOrderConfirmedPublisher implements OrderConfirmedPublisher {
         }
     }
 
+    @Override
+    public void republish(OrderConfirmedPayload payload) {
+    }
+
     private void fail(OrderConfirmedPayload payload, Throwable failure) {
         publishFailures.increment();
         log.error("주문 확정 이벤트 발행 실패. eventId={}, orderId={}, topic={}, causeType={}",

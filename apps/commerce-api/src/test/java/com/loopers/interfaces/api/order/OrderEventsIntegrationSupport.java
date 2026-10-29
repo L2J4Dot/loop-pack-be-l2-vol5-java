@@ -45,6 +45,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import({PaymentLookupScheduleIntegrationTest.TimeConfig.class, OrderEventsTestConfig.class})
 abstract class OrderEventsIntegrationSupport {
     static final String TOPIC = "order-events-it-" + UUID.randomUUID();
+    static final String REQUEST_TOPIC = "order-event-republish-requests-it-" + UUID.randomUUID();
+    static final String REQUEST_GROUP = "commerce-api-republish-it-" + UUID.randomUUID();
     static final Instant NOW = Instant.parse("2026-10-29T01:00:00Z");
 
     @Value("${spring.kafka.bootstrap-servers}") String bootstrapServers;
@@ -72,6 +74,9 @@ abstract class OrderEventsIntegrationSupport {
     static void orderEventsTopic(DynamicPropertyRegistry registry) {
         registry.add("commerce.kafka.topics.order-events", () -> TOPIC);
         registry.add("commerce.kafka.topics.order-events-partitions", () -> 1);
+        registry.add("commerce.kafka.topics.order-event-republish-requests", () -> REQUEST_TOPIC);
+        registry.add("commerce.kafka.topics.order-event-republish-requests-partitions", () -> 1);
+        registry.add("commerce.kafka.groups.order-event-republish", () -> REQUEST_GROUP);
     }
 
     @BeforeEach

@@ -91,6 +91,11 @@ public class OrderEventsTestConfig {
             sent.add(payload);
             delegate.send(payload);
         }
+
+        @Override
+        public void republish(OrderConfirmedPayload payload) {
+            delegate.republish(payload);
+        }
     }
 
     // 실제 producer factory로 보내다가, 무장하면 send를 실패시킨다. 운영 publisher의 실패 처리(로그·지표)는 그대로 거친다.

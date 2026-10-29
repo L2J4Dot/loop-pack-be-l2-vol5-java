@@ -39,8 +39,13 @@ commerce:
     topics:
       order-events: order-events
       order-events-partitions: 3
+      order-event-republish-requests: order-event-republish-requests
+      order-event-republish-requests-partitions: 3
+    groups:
+      order-event-republish: commerce-api-republish
     producer:
       max-block: 2s # broker 장애 때 metadata 대기로 요청 스레드가 묶이는 상한 (Kafka 기본 60초)
+      republish-timeout: 10s # 재발행 명령 처리에서 OrderConfirmed send 확인을 기다리는 상한
 
 # 설계 21절. PG 우선순위와 연결 설정. 타임아웃은 [임시] 수치이며 측정 후 조정한다.
 payment:

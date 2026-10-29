@@ -54,6 +54,13 @@ public class OrderEventsProbe implements AutoCloseable {
         return records.get(indexOf(records, eventId));
     }
 
+    public List<ConsumerRecord<String, String>> awaitEvents(long from, String eventId, int count) {
+        List<ConsumerRecord<String, String>> records = readUntil(from,
+            found -> found.stream().filter(record -> eventId.equals(eventId(record))).count() >= count,
+            "eventId=" + eventId + " record " + count + "건 도착");
+        return records.stream().filter(record -> eventId.equals(eventId(record))).toList();
+    }
+
     // 경계 record까지 읽어 그 사이(경계 포함)의 record를 돌려준다.
     public List<ConsumerRecord<String, String>> readThrough(long from, String boundaryEventId) {
         List<ConsumerRecord<String, String>> records = readUntil(from, found -> indexOf(found, boundaryEventId) >= 0,
