@@ -993,7 +993,7 @@ PG 취소 API 연동(늦은 성공의 자동 환불), 다중 서버 선점, 실�
 
 - **발행 위치(D72):** 결과 반영 경계(`applyLocked`)의 `CHANGED` 분기에서 바뀐 상태가 `CONFIRMED`일 때, 즉 최초 확정 순간에 같은 트랜잭션 안에서 저장된 주문으로 payload를 만들어 Spring application event로 발행한다. 별도 Bean의 `@TransactionalEventListener(phase = AFTER_COMMIT)`가 Kafka로 send한다. rollback이면 listener가 실행되지 않는다. listener 시점에 주문을 다시 읽지 않고(lazy 로딩 금지), listener 안에서 DB에 쓰지 않는다.
 - **confirmedAt(D78):** 주문(`orders.confirmed_at`)에 저장한다. 주문 도메인이 처음 `CONFIRMED`로 바뀔 때 주입한 `Clock`으로 한 번만 기록하고 이후 바꾸지 않는다(중복 callback·재조회가 바꾸지 못함). 이미 `CONFIRMED`인 옛 주문(과거 포인트 결제, 이전 PG 확정)은 null로 두고 소급 발행하지 않는다. ddl-auto를 쓰지 않는 환경은 배포 전에 `src/main/resources/sql/add-order-confirmed-at.sql`을 실행한다(열·인덱스 `(status, confirmed_at)`이 없을 때만 추가, 다시 실행해도 안전, 값을 채우지 않음). 주문 조회 응답에는 노출하지 않는다(기존 API 계약 유지).
-- **confirmedAt 정밀도 [임시]:** 밀리초로 자른다. 같은 확정을 저장된 주문에서 다시 만들어도(3b 재발행) payload가 같아야 하는데, 시스템 Clock의 나노초는 DB `DATETIME(6)`에 반올림되어 들어가 메모리 값과 달라질 수 있기 때문이다.
+- **confirmedAt 정밀도 [확정] (2026-10-29 사용자 승인):** 밀리초로 자른다. 같은 확정을 저장된 주문에서 다시 만들어도(3b 재발행) payload가 같아야 하는데, 시스템 Clock의 나노초는 DB `DATETIME(6)`에 반올림되어 들어가 메모리 값과 달라질 수 있기 때문이다.
 - **eventId(D79):** `order-confirmed:v1:{orderId}`. 전제: 주문은 한 번만 `CONFIRMED`가 된다(종결 상태, 결제 기록 주문당 하나). 같은 주문의 재확정 기능이 생기면 `v2` + 시도 번호로 규칙을 바꾼다.
 - **payload 생성은 한 곳:** 저장된 주문(주문 ID, confirmedAt, 품목)만 입력으로 받는다. 같은 상품은 합산하고 items는 productId 오름차순이다. record key는 `String.valueOf(orderId)`. 카드 정보·PG 비밀·사용자 개인정보를 넣지 않고 상품 행·현재 가격을 조회하지 않는다. 3b 재발행도 같은 생성 코드를 쓴다.
 - **발행 결과 대기(D80):** send는 기다리지 않는다(비동기). 성공이면 callback에서 (topic, partition, offset)을 INFO 로그로, 실패면 ERROR 로그와 실패 지표로 드러낸다. 놓친 발행은 3b 대사가 재발행한다.
