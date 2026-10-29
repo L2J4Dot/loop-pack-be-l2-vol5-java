@@ -4,12 +4,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.loopers.application.order.OrderConfirmedPayload;
 import com.loopers.infrastructure.payment.TestPgServer.CreateBehavior;
 import com.loopers.support.kafka.OrderEventsProbe;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.core.io.ClassPathResource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -17,6 +21,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 // 과제 실험 ④: DB commit과 Kafka send 사이의 누락 구간. 두 사례 모두 고정 Clock(2026-10-29T01:00:00Z)과
 // 같은 품목(첫 상품×2, 둘째 상품×1)으로 기존 주문 API → 테스트 PG → 결과 반영 경로를 거친다. 결과는 docs/week6/order-event-gap-cases.md.
 class OrderConfirmedGapCaseTest extends OrderEventsIntegrationSupport {
+    // streamer OrderConfirmedGapCaseConsumedTest가 실제 listener로 소비하는 값. 사례 B broker record와 같음을 여기서 확인한다.
+    private static final String CASE_B_FIXTURE = "contracts/order-confirmed-gap-case-b.json";
+    private static final String CASE_B_KEY = "1";
 
     @Test
     @DisplayName("사례 A: commit 뒤 send 직전에 멈추면 주문은 CONFIRMED·예약 소비로 남지만 그 eventId의 record는 broker에 없다")
@@ -57,10 +64,18 @@ class OrderConfirmedGapCaseTest extends OrderEventsIntegrationSupport {
         assertThat(stock(second)).isEqualTo(4);
         assertThat(record.key()).isEqualTo(String.valueOf(orderId));
         assertThat(message.path("confirmedAt").asText()).isEqualTo("2026-10-29T01:00:00Z");
+        assertThat(message).isEqualTo(OrderEventsProbe.json(caseBFixture()));
+        assertThat(record.key()).isEqualTo(CASE_B_KEY);
 
         System.out.println("[실험④ 사례 B] " + describe(orderId) + ", 재고(첫/둘째)=3/4, broker record=(topic=" + record.topic()
             + ", partition=" + record.partition() + ", offset=" + record.offset() + ", key=" + record.key() + "), value="
             + record.value());
+    }
+
+    private static String caseBFixture() throws IOException {
+        try (InputStream input = new ClassPathResource(CASE_B_FIXTURE).getInputStream()) {
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 
     private Map<String, Object> state(long orderId) {
