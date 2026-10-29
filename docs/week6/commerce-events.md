@@ -982,6 +982,7 @@ PG 취소 API 연동(늦은 성공의 자동 환불), 다중 서버 선점, 실�
 | 같은 eventId인데 내용이 다름 / 같은 orderId인데 eventId가 다름 (D68) | 구매 활동을 추가하지 않고 이상 기록(`order_event_anomaly`) 후 정상 ack. 충돌은 처리 실패가 아니라 처리 결과다 |
 | DB 저장 실패 등 일시적 실패, 이상 기록 저장 실패 포함 (D69) | 1초 간격 3회 재시도. 그래도 실패하면 건너뛰지 않고 컨테이너를 멈춘다. 그 offset은 commit하지 않는다. 재시도 총시간은 `max.poll.interval.ms`보다 충분히 짧게 둔다 |
 | 처음 보는 `schemaVersion` (D70) | 재시도 없이 바로 멈춘다. 받는 쪽을 고쳐 배포·재시작하면 같은 record부터 처리된다. 모르는 버전 도착은 배포 순서 실수·계약 위반의 신호다 |
+| `OrderConfirmed`가 아닌 `eventType` (D70 기준 적용, 2026-10-29 사용자 승인) | 처음 보는 `schemaVersion`과 같이 재시도 없이 바로 멈춘다. 받는 쪽이 그 eventType을 알게 되면 같은 record로 성공하기 때문이다. `eventType` 누락은 필수 필드 누락이다 |
 | 모르는 필드 (D70) | 무시한다. 필드 추가는 호환되는 변경이다 |
 | 깨진 JSON, 필수 필드 누락, key와 payload orderId 불일치, 수량 0 이하, items 안 같은 상품 중복 (D70) | record 내용 자체가 틀려 고칠 수 없으므로 충돌과 같이 이상 기록 후 ack |
 
