@@ -11,7 +11,7 @@
 
 ## 재현 조건
 
-- 사용한 커밋: `ecf41f6` (`OrderConfirmedGapCaseTest`), 발행 구현은 `237e8c6`·`408bf6b`
+- 사용한 커밋: `ecf41f6` (`OrderConfirmedGapCaseTest`), 발행 구현은 `237e8c6`·`408bf6b`. 사례 B fixture 비교 단언과 streamer 소비 테스트는 `77f734e`
 - 실행: `./gradlew :apps:commerce-api:test --tests '*OrderConfirmedGapCaseTest' -i` 후 `[실험④ 사례 A]`·`[실험④ 사례 B]` 줄 확인
 - 공통: 고정 Clock `2026-10-29T01:00:00Z`, 상품 2개(재고 각 5), 주문 품목 첫 상품×2·둘째 상품×1. 기존 주문 API(`POST /api/v1/orders/{id}/confirm`) → 로컬 테스트 PG 서버(create 즉시 SUCCESS) → 실제 결과 반영 경로로 확정한다.
 - broker: Testcontainers `apache/kafka:3.8.1`, 테스트마다 고유 접미사를 붙인 단일 partition topic. 고유 group의 테스트 consumer로 읽는다.
@@ -34,6 +34,7 @@
 | 결제 기록 결과 / PG 상태 | `SUCCESS` / `SUCCESS` | `SUCCESS` / `SUCCESS` |
 | 예약(재고 첫/둘째, 시작 5/5) | 3/4 (소비 유지) | 3/4 (소비 유지) |
 | broker | 그 eventId record 없음. 경계까지 읽은 eventId는 `order-confirmed:v1:2`뿐 | (topic=`order-events-it-…`, partition=0, offset=0), key=`1` 1건 |
+| 구매 활동(streamer 실제 소비) | 없음(대사 전) | 완료 기록 1행, 구매 활동 2행(상품 1×2, 상품 2×1, confirmedAt 2026-10-29T01:00:00Z), group `purchase-activity` committed 보내기 전 없음 → 처리 후 n+1 |
 
 사례 B의 record 값:
 
@@ -45,12 +46,17 @@
 
 ## 소비 쪽까지의 연결
 
-commerce-api 테스트에서 commerce-streamer를 함께 띄우지 않았다. 대신 공유 계약 fixture(`modules/kafka/src/testFixtures/resources/contracts/order-confirmed-v1.json`)로 연결을 증명한다.
+사례 B의 record 값을 fixture `modules/kafka/src/testFixtures/resources/contracts/order-confirmed-gap-case-b.json`으로 고정했다. 위 "사례 B의 record 값"과 같은 한 줄이고, key는 `1`이다.
 
-- api `OrderConfirmedContractTest`: 팩토리·직렬화가 같은 주문에서 만든 메시지가 fixture와 정규화해서 같다.
-- streamer `OrderConfirmedContractTest`: 같은 fixture를 파싱·처리하면 구매 활동 2행이 남는다.
+- api `OrderConfirmedGapCaseTest` 사례 B: broker에서 읽은 record의 value를 JSON으로 읽은 값이 이 fixture와 같고(정규화 비교), key가 `"1"`이다.
+- streamer `OrderConfirmedGapCaseConsumedTest`: 이 fixture 값을 key `1`로 고유 topic에 보내고, 실제 `OrderEventsListener`(운영 group `purchase-activity`)가 소비하게 한다. handler는 직접 부르지 않는다. 결과는 위 표의 "구매 활동(streamer 실제 소비)" 행이다. 완료 기록 1행, 구매 활동 2행이 남고, 이상 기록은 0행이다. committed offset은 보내기 전 없음에서 처리 후 n+1이 된다. 이 listener는 DB commit 뒤에만 ack하므로, committed n+1은 저장이 끝났다는 뜻이기도 하다.
+  - 실행: `./gradlew :apps:commerce-streamer:test --tests '*OrderConfirmedGapCaseConsumedTest' -i` 후 `[실험④ 사례 B 소비]` 줄 확인
+- 보조 근거: 주문 42 공유 계약 fixture(`modules/kafka/src/testFixtures/resources/contracts/order-confirmed-v1.json`)를 쓰는 두 `OrderConfirmedContractTest`.
+  - api 쪽은 팩토리·직렬화가 같은 주문에서 만든 메시지가 fixture와 정규화해서 같음을 보인다.
+  - streamer 쪽은 같은 fixture를 파싱·처리하면 구매 활동 2행이 남음을 보인다.
+- 증명하지 못하는 것: api와 streamer를 한 실행에서 함께 띄우지 않는다. streamer 테스트의 record는 api producer가 아니라 테스트 producer가 보낸다. 두 테스트를 잇는 것은 같은 fixture다.
 
-사례 B의 record는 fixture와 주문 ID·상품 ID만 다른 같은 모양이다. 따라서 streamer는 이 record를 구매 활동 2행으로 처리한다. 사례 A의 확정은 broker에 없으므로 구매 활동에 영영 나타나지 않는다. 대사가 재발행해야만 나타난다.
+사례 A의 확정은 broker에 없으므로 구매 활동에 영영 나타나지 않는다. 대사가 재발행해야만 나타난다.
 
 ## 남는 한계
 
