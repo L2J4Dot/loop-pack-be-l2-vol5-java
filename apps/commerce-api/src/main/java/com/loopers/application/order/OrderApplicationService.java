@@ -1,5 +1,6 @@
 package com.loopers.application.order;
 
+import com.loopers.application.order.port.OrderConfirmedPublisher;
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentExpiryPolicy;
 import com.loopers.application.payment.PaymentGatewayRegistry;
@@ -55,12 +56,14 @@ public class OrderApplicationService {
     private final PaymentLookupPolicy paymentLookupPolicy;
     private final PaymentExpiryPolicy paymentExpiryPolicy;
     private final ApplicationEventPublisher applicationEventPublisher;
+    private final OrderConfirmedPublisher orderConfirmedPublisher;
 
     public OrderApplicationService(OrderRepository orderRepository, ProductRepository productRepository,
         PaymentRecordRepository paymentRecordRepository, PaymentGatewayRegistry paymentGatewayRegistry,
         TransactionTemplate transactionTemplate, PaymentAnomalyRepository paymentAnomalyRepository, Clock clock,
         PaymentLookupScheduleRepository paymentLookupScheduleRepository, PaymentLookupPolicy paymentLookupPolicy,
-        PaymentExpiryPolicy paymentExpiryPolicy, ApplicationEventPublisher applicationEventPublisher) {
+        PaymentExpiryPolicy paymentExpiryPolicy, ApplicationEventPublisher applicationEventPublisher,
+        OrderConfirmedPublisher orderConfirmedPublisher) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
         this.paymentRecordRepository = paymentRecordRepository;
@@ -72,6 +75,7 @@ public class OrderApplicationService {
         this.paymentLookupPolicy = paymentLookupPolicy;
         this.paymentExpiryPolicy = paymentExpiryPolicy;
         this.applicationEventPublisher = applicationEventPublisher;
+        this.orderConfirmedPublisher = orderConfirmedPublisher;
     }
 
     public record ItemRequest(long productId, int quantity) { }
@@ -442,8 +446,22 @@ public class OrderApplicationService {
             .toList();
     }
 
+    // 대사 명령을 그대로 믿지 않고 저장된 주문으로 다시 확인한다. 같은 팩토리로 만들어 처음 발행과 같은 eventId·payload다(설계 27절).
+    // 트랜잭션 없이 읽고 보낸다. broker 확인을 기다리는 동안 DB 연결을 잡고 있지 않기 위해서다.
     public RepublishResult republishConfirmed(long orderId) {
-        return RepublishResult.ORDER_NOT_FOUND;
+        Optional<Order> found = orderRepository.findById(orderId);
+        if (found.isEmpty()) {
+            return RepublishResult.ORDER_NOT_FOUND;
+        }
+        Order order = found.get();
+        if (order.getStatus() != Order.Status.CONFIRMED) {
+            return RepublishResult.NOT_CONFIRMED;
+        }
+        if (order.getConfirmedAt() == null) {
+            return RepublishResult.NO_CONFIRMED_AT;
+        }
+        orderConfirmedPublisher.republish(OrderConfirmedPayloadFactory.create(order));
+        return RepublishResult.REPUBLISHED;
     }
 
     @Transactional(readOnly = true)

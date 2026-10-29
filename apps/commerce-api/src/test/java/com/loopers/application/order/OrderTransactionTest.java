@@ -1,6 +1,7 @@
 package com.loopers.application.order;
 
 import com.loopers.application.brand.BrandApplicationService;
+import com.loopers.application.order.port.OrderConfirmedPublisher;
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentExpiryPolicy;
 import com.loopers.application.payment.PaymentGatewayRegistry;
@@ -82,6 +83,9 @@ class OrderTransactionTest {
 
     @Autowired
     private ApplicationEventPublisher applicationEventPublisher;
+
+    @Autowired
+    private OrderConfirmedPublisher orderConfirmedPublisher;
 
     @Autowired
     private PaymentLookupScheduleRepository paymentLookupScheduleRepository;
@@ -274,7 +278,7 @@ class OrderTransactionTest {
             failingPaymentRecordRepository,
             new PaymentGatewayRegistry(List.of(testPgFixture.newClient()), List.of(TestPgFixture.PROVIDER_ID)),
             transactionTemplate, paymentAnomalyRepository, clock, paymentLookupScheduleRepository, paymentLookupPolicy,
-            paymentExpiryPolicy, applicationEventPublisher);
+            paymentExpiryPolicy, applicationEventPublisher, orderConfirmedPublisher);
         OrderResult afterRestart = restarted.confirm(1, orderId, TestPgFixture.command(attemptKey));
 
         assertThat(afterRestart.status()).isEqualTo("PAYMENT_PENDING");

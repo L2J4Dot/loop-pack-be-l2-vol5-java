@@ -140,8 +140,16 @@ class OrderEventRepublishIntegrationTest extends OrderEventsIntegrationSupport {
         assertThat(Duration.between(sentAt, Instant.now())).isLessThan(Duration.ofSeconds(3));
         assertThat(committed()).isEqualTo(committedBefore);
         // 다음 테스트가 같은 topic을 쓰므로 정지 원인 record 다음으로 group 위치를 옮긴 뒤 재시작한다.
-        admin.alterConsumerGroupOffsets(REQUEST_GROUP, Map.of(REQUESTS, new OffsetAndMetadata(n + 1)))
-            .all().get(10, TimeUnit.SECONDS);
+        // 멈춘 consumer가 group에서 빠지기 전에는 위치를 옮길 수 없어 성공할 때까지 다시 시도한다.
+        awaitUntil("재발행 명령 group 위치를 n+1로 이동", () -> {
+            try {
+                admin.alterConsumerGroupOffsets(REQUEST_GROUP, Map.of(REQUESTS, new OffsetAndMetadata(n + 1)))
+                    .all().get(10, TimeUnit.SECONDS);
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        });
     }
 
     @Test

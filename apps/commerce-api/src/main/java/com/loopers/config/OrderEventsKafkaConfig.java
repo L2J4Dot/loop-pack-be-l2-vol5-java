@@ -36,4 +36,10 @@ public class OrderEventsKafkaConfig {
         @Value("${commerce.kafka.topics.order-events-partitions}") int partitions) {
         return TopicBuilder.name(topic).partitions(partitions).replicas(1).build();
     }
+
+    @Bean
+    NewTopic orderEventRepublishRequestsTopic(@Value("${commerce.kafka.topics.order-event-republish-requests}") String topic,
+        @Value("${commerce.kafka.topics.order-event-republish-requests-partitions}") int partitions) {
+        return TopicBuilder.name(topic).partitions(partitions).replicas(1).build();
+    }
 }
