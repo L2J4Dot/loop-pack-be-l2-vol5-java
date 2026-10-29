@@ -1002,6 +1002,17 @@ PG 취소 API 연동(늦은 성공의 자동 환불), 다중 서버 선점, 실�
 - **`max.block.ms` [임시]:** 2초(`commerce.kafka.producer.max-block`). broker 장애 때 metadata 대기로 요청 스레드가 오래 묶이지 않게 한다.
 - **topic 선언 [임시]:** commerce-api가 `order-events`를 `NewTopic`으로 선언한다(없을 때만 생성). partition 3(`commerce.kafka.topics.order-events-partitions`), replication 1. broker 자동 생성에 맡기면 partition 수가 broker 설정에 따라 달라지고, partition 수를 나중에 늘리면 key → partition 배치가 바뀌어 같은 주문 순서 보장 범위가 흔들리므로 처음부터 소비자를 3개까지 늘릴 수 있는 값으로 둔다. replication 1은 로컬 단일 broker 기준이며 운영 복제 수는 범위 밖이다. 테스트는 고유 접미사 topic을 같은 선언으로 만든다.
 
-### 3b로 넘긴 것 [확정, 구현은 3b] (D73~D77)
+### 대사와 재발행 [확정] (D73~D77, D82~D87, 2026-10-29 사용자 결정)
 
-- 놓친 발행의 대사: commerce-batch 대사, 재발행 명령 topic, commerce-api의 재발행 명령 consumer. 대사는 `(status, confirmed_at)` 인덱스로 확정 주문을 범위로 고르고, 재발행은 위 payload 생성 코드를 그대로 쓴다. 세부 규칙은 3b에서 이 절에 반영한다.
+3a 실험 ④의 사례 A(주문은 CONFIRMED인데 OrderConfirmed가 broker에 없고 로그·지표도 남지 않음)를 끝에서 끝까지 비교해 찾아 다시 흘려보내는 안전망이다. 7주차 Outbox(누락 예방)와 역할이 다르며 그 뒤에도 남는다.
+
+- **흐름:** commerce-batch 대사 Job이 누락 orderId를 찾아 재발행 명령을 보낸다 → commerce-api 명령 consumer가 주문을 재확인하고 3a와 같은 `OrderConfirmedPayloadFactory`로 OrderConfirmed를 다시 보낸다 → streamer는 기존 멱등 소비(이미 있으면 no-op). batch는 이벤트 형식을 모르고, OrderConfirmed의 주인은 commerce-api 하나다.
+- **누락 정의:** `orders.status = CONFIRMED`, `confirmed_at`이 읽는 구간 안, `processed_order_confirmation`에 그 order_id가 없음. `confirmed_at`이 null인 옛 CONFIRMED 주문은 대상이 아니다.
+- **읽는 구간(워터마크 증분):** `[워터마크 − 겹침, 지금 − 유예)`. 유예 5분·겹침 1분 [임시]. 바꿀 신호: 재발행 뒤 streamer no-op 비율, 찾은 누락 건수 추이. 겹침은 워터마크보다 이른 시각으로 찍혔지만 그 뒤에 commit된 확정을 다음 실행이 잡기 위한 것이고, 겹친 구간의 이미 보낸 누락은 다시 명령될 수 있다(멱등 소비가 흡수).
+- **워터마크:** batch 전용 테이블 `reconcile_checkpoint(name PK, watermark_confirmed_at, watermark_order_id, updated_at)` 한 줄. 위치는 `(confirmed_at, order_id)` 두 값이다(같은 시각 동률 대비). 행이 없으면(첫 실행) 가장 이른 시각부터 읽는다. 겹침이 0이면 워터마크 위치 다음부터, 겹침이 있으면 `워터마크 시각 − 겹침`부터 그 시각을 포함해 읽는다. ddl-auto를 쓰지 않는 환경은 `apps/commerce-batch/src/main/resources/sql/create-reconcile-checkpoint.sql`을 실행한다(없을 때만 생성, local·test는 시작 시 자동 실행).
+- **청크 처리:** 누락 주문을 `(confirmed_at, order_id)` 오름차순 keyset으로 청크 크기만큼 읽는다 → 청크의 명령을 모두 send하고 broker 확인을 전부 받은 뒤에만 워터마크를 그 청크 마지막 위치로 갱신한다(청크 트랜잭션과 함께 commit) → step이 끝까지 성공하면 워터마크를 구간 끝(`지금 − 유예`, order_id는 최대)으로 갱신한다. send 실패면 예외로 step이 실패하고 워터마크는 마지막 성공 청크에 남는다. 청크 크기 100 [임시], send 확인 대기 상한 10초 [임시].
+- **명령:** topic `order-event-republish-requests`, key = orderId, 명령 하나 = 주문 하나. payload `{commandType: "RepublishOrderConfirmed", schemaVersion: 1, orderId, requestedAt}`(requestedAt은 UTC ISO-8601). 여러 건은 명령 여러 개를 모두 보낸 뒤 확인을 기다려 producer가 묶어 보내게 한다. topic은 commerce-api가 `NewTopic`으로 선언한다(partition 3·복제 1 [임시], order-events와 같은 이유).
+- **commerce-api 명령 consumer:** 명령을 그대로 믿지 않고 주문이 실제로 `CONFIRMED`이고 `confirmed_at`이 있는지 재확인한다. 맞으면 같은 팩토리로 payload를 만들어 send하고, 재발행 send의 broker 확인을 받은 뒤에만 명령을 ack한다. 사용자 요청 경로가 아니라서 여기서는 기다린다(D80의 비동기 send와 다른 점). 주문 없음·CONFIRMED 아님·confirmed_at 없음은 재발행하지 않고 로그를 남긴 뒤 ack한다. send 실패는 재시도 후 멈춘다(`RetryThenStopErrorHandler`). 모르는 명령 버전·종류는 즉시 멈춘다. 깨진 명령(JSON 오류, 필수 필드 누락, key와 orderId 불일치)은 고칠 수 없는 record라 ERROR 로그·지표 후 ack한다(D70 기준). group `commerce-api-republish`, `auto.offset.reset=earliest`(committed offset이 없을 때 쌓인 명령을 건너뛰면 누락이 다시 묻힌다. 재처리는 재발행이 멱등이라 흡수한다).
+- **설정과 실행:** 유예·겹침·청크 크기는 batch 설정 속성(`commerce.reconcile.*`, 환경변수로 덮어쓰기 가능)이다. 실행 주기는 바깥 스케줄러(cron 등) 몫이고 batch는 실행마다 Job(`orderEventReconcileJob`) 한 번이다. "지금 바로 보기"는 같은 Job을 즉시 실행하는 것이며 정기 실행과 같고 워터마크도 같이 움직인다. Job 끝에 요약 한 줄을 남긴다: 구간, 확인한 확정 주문 수, 누락 orderId, 명령 send 결과, 워터마크 전후.
+- **경계 메모(D75):** batch가 `orders`와 `processed_order_confirmation`을 함께 읽는 것은 운영 도구인 대사의 권한으로 허용한다. batch는 api·streamer의 엔티티 클래스에 의존하지 않고 JDBC로 읽는다. api·streamer는 서로의 테이블을 읽지 않는다. 지금은 같은 MySQL이라 SQL `NOT EXISTS`로 읽지만, DB가 나뉘면 양쪽을 따로 읽어 비교하는 방식으로 바뀌어야 한다.
+- **한계:** 과거 구간 재훑기·특정 orderId 지정 재발행은 없다. 재발행은 7주차 Outbox relay와 역할이 겹치는 부분이 있다.
