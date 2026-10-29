@@ -2,8 +2,9 @@ package com.loopers.application.purchase;
 
 import com.loopers.support.PurchaseActivityTables;
 import com.loopers.utils.DatabaseCleanUp;
-import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -55,7 +56,8 @@ class PurchaseActivityHandlerTest {
         assertThat(activities).hasSize(2);
         assertThat(activities.get(0)).containsEntry("product_id", 7L).containsEntry("quantity", 2);
         assertThat(activities.get(1)).containsEntry("product_id", 8L).containsEntry("quantity", 1);
-        assertThat(((Timestamp) activities.get(0).get("confirmed_at")).toInstant()).isEqualTo(CONFIRMED_AT);
+        // DB에는 UTC로 저장한다(jpa.yml hibernate.jdbc.time_zone=UTC).
+        assertThat(activities.get(0).get("confirmed_at")).isEqualTo(LocalDateTime.ofInstant(CONFIRMED_AT, ZoneOffset.UTC));
     }
 
     @DisplayName("같은 이벤트가 두 번 오면 두 번째는 아무것도 하지 않아 완료 기록 1행·구매 활동 2행·이상 기록 0행 그대로다")
