@@ -4,6 +4,7 @@ import com.loopers.domain.common.InvalidValueException;
 import com.loopers.domain.common.Money;
 import com.loopers.domain.common.RuleViolationException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 public final class Order {
@@ -32,6 +33,7 @@ public final class Order {
         this.items = List.copyOf(items);
         this.total = items.stream().map(OrderItem::subtotal).reduce(new Money(0), Money::add);
         this.status = status;
+        this.confirmedAt = confirmedAt;
     }
 
     public static Order create(long userId, List<OrderItem> items) {
@@ -61,6 +63,10 @@ public final class Order {
             case PAYMENT_PENDING -> switch (outcome) {
                 case SUCCEEDED -> {
                     status = Status.CONFIRMED;
+                    // 최초 확정 시각은 이벤트 사실이라 한 번만 남긴다. 저장 후 다시 만든 payload와 같도록 밀리초로 자른다(설계 27절).
+                    if (confirmedAt == null) {
+                        confirmedAt = now.truncatedTo(ChronoUnit.MILLIS);
+                    }
                     yield PaymentTransition.CHANGED;
                 }
                 case FAILED -> {
