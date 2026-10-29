@@ -20,9 +20,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.Job;
 import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.test.JobLauncherTestUtils;
-import org.springframework.batch.test.context.SpringBatchTest;
+import org.springframework.batch.core.JobParametersBuilder;
+import org.springframework.batch.core.launch.JobLauncher;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -38,9 +39,9 @@ import org.springframework.test.context.TestPropertySource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-// 실제 MySQL·Kafka로 대사 Job을 직접 실행한다. 청크 경계를 보려고 청크 크기를 2로 둔다. 시작 시 Job 자동 실행은 끈다.
+// 실제 MySQL·Kafka로 대사 Job을 직접 실행한다. @SpringBatchTest는 테스트 메서드마다 step scope를 따로 열어 step 범위 빈이
+// 실제 step 대신 그 범위에 묶이므로 쓰지 않고 JobLauncher로 실행한다. 청크 경계를 보려고 청크 크기를 2로 둔다. 시작 시 Job 자동 실행은 끈다.
 @SpringBootTest
-@SpringBatchTest
 @ExtendWith(OutputCaptureExtension.class)
 @Import(ReconcileTestConfig.class)
 @TestPropertySource(properties = {
@@ -54,7 +55,8 @@ class OrderEventReconcileJobTest {
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
     @Value("${spring.kafka.bootstrap-servers}") private String bootstrapServers;
-    @Autowired private JobLauncherTestUtils jobLauncherTestUtils;
+    @Autowired private JobLauncher jobLauncher;
+    @Autowired private Job orderEventReconcileJob;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private DataSource dataSource;
     @Autowired private MutableClock clock;
@@ -192,7 +194,8 @@ class OrderEventReconcileJobTest {
     }
 
     private JobExecution run() throws Exception {
-        return jobLauncherTestUtils.launchJob(jobLauncherTestUtils.getUniqueJobParameters());
+        return jobLauncher.run(orderEventReconcileJob, new JobParametersBuilder()
+            .addString("run", UUID.randomUUID().toString()).toJobParameters());
     }
 
     private long order(String status, Instant confirmedAt) {
