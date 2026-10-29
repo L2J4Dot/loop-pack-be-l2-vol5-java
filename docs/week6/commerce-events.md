@@ -987,6 +987,7 @@ PG 취소 API 연동(늦은 성공의 자동 환불), 다중 서버 선점, 실�
 | 깨진 JSON, 필수 필드 누락, key와 payload orderId 불일치, 수량 0 이하, items 안 같은 상품 중복 (D70) | record 내용 자체가 틀려 고칠 수 없으므로 충돌과 같이 이상 기록 후 ack |
 
 - `order_event_anomaly`는 (`topic`, `partition_no`, `offset_no`) 유일이다. 같은 record가 재전달돼도 이상 행은 하나다.
+- `purchase-activity` group만 `auto.offset.reset=earliest`를 쓴다(공통 `kafka.yml` 기본값 `latest`는 유지). committed offset이 없을 때(첫 배포, retention으로 offset이 유효하지 않을 때) 그 전에 쌓인 OrderConfirmed를 건너뛰면 구매 활동이 영구 누락되고, earliest로 생기는 재처리는 완료 기록과 유일 제약의 멱등 소비가 no-op으로 흡수한다. (2026-10-29 사용자 승인)
 
 ### 아직 정하지 않은 것 [미결]
 
