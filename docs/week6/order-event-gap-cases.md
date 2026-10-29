@@ -56,3 +56,47 @@ commerce-api 테스트에서 commerce-streamer를 함께 띄우지 않았다. �
 
 - 사례 A의 확정은 지금은 누구도 다시 보내지 않는다. 실패 지표·ERROR 로그도 남지 않는다. send 실패가 아니라 send가 아예 없었기 때문이다. 3b 대사(`(status, confirmed_at)` 범위 조회 → 같은 payload 생성 코드로 재발행)가 이 구간을 메운다.
 - 7주차 Outbox는 확정과 같은 트랜잭션에 발행할 일을 기록해 이 구간 자체를 없애는 방향이다.
+
+## 3b 이후: 사례 A 복구
+
+3b 대사(commerce-batch)와 재발행 명령 consumer(commerce-api)로 사례 A를 찾아 다시 흘려보낸 기록이다. 위 3a 기록은 그대로 둔다.
+
+### 재현 조건
+
+- 사용한 커밋: `f03f52b`. batch `OrderEventReconcileJobTest.caseAMissingConfirmationIsRequested`, api `OrderEventRepublishIntegrationTest.caseAIsRecoveredByRepublishRequest`를 쓴다. 대사·재발행 구현은 `e6609dd`·`7d39143`이다.
+- 실행:
+  - `./gradlew :apps:commerce-batch:test --tests '*OrderEventReconcileJobTest' -i`
+  - `./gradlew :apps:commerce-api:test --tests '*OrderEventRepublishIntegrationTest' -i`
+  - 두 명령 모두 `[실험④ 3b 사례 A 복구·…]` 줄을 확인한다.
+- 두 모듈의 테스트는 각자 MySQL·Kafka 컨테이너를 띄운다. 그래서 한 실행 안에서 batch가 보낸 명령을 api가 그대로 받지는 않는다. 둘을 잇는 것은 공유 계약 fixture `republish-order-confirmed-v1.json`이다. batch 직렬화는 fixture와 같고, api 파서는 fixture를 주문 42 명령으로 읽는다. api 테스트는 batch가 만드는 것과 같은 모양의 명령을 topic에 직접 넣는다.
+- batch: 사례 A와 같은 상태의 주문을 둔다. 주문 1, `CONFIRMED`, `confirmed_at = 2026-10-29T01:00:00Z`, `processed_order_confirmation`에 없음. Clock `2026-10-29T01:10:00Z`에서 Job을 한 번 실행한다(유예 5분·겹침 1분).
+- api: 3a 사례 A와 같은 방식으로 상태를 만든다. 고정 Clock `2026-10-29T01:00:00Z`, 첫 상품×2·둘째 상품×1로 기존 주문 API → 테스트 PG(SUCCESS) → 결과 반영 경로를 거친다. commit 뒤 send 직전에서 멈춘다. 그다음 그 주문의 재발행 명령을 명령 topic에 넣는다.
+
+### 결과
+
+| 항목 | 값 |
+| --- | --- |
+| orderId | 1 |
+| eventId | `order-confirmed:v1:1` |
+| batch가 찾은 누락 | 주문 1 하나. 명령 record (topic=`order-event-republish-requests-it-…`, partition=0, offset=1), key=`1` |
+| batch 명령 값 | `{"commandType":"RepublishOrderConfirmed","schemaVersion":1,"orderId":1,"requestedAt":"2026-10-29T01:10:00Z"}` |
+| batch 워터마크 | 실행 뒤 (`2026-10-29T01:05:00Z`, 최대 주문 ID) |
+| api 명령 | (topic=`order-event-republish-requests-it-…`, partition=0, offset=0) → 처리 후 group committed offset 1 |
+| api가 재발행한 OrderConfirmed | (topic=`order-events-it-…`, partition=0, offset=0), key=`1`. 이 topic에서 이 eventId의 첫 record다 |
+| 재발행 payload | `{"eventType":"OrderConfirmed","schemaVersion":1,"eventId":"order-confirmed:v1:1","orderId":1,"confirmedAt":"2026-10-29T01:00:00Z","items":[{"productId":1,"quantity":2},{"productId":2,"quantity":1}]}` |
+| 처음 발행됐어야 할 payload와 비교 | send 직전에 멈춘 payload를 직렬화한 값과 정규화해서 같고 key도 같다 |
+
+batch 명령 offset이 1인 것은 같은 테스트 topic에 앞선 테스트의 명령이 있었기 때문이다. topic 이름 접미사는 실행마다 바뀐다.
+
+### 소비 쪽까지의 연결
+
+- 재발행 record의 모양은 3a 공유 계약 fixture와 같다. streamer `OrderConfirmedContractTest`가 이 모양을 구매 활동 2행으로 처리한다.
+- 이미 소비된 주문이 다시 재발행되는 경우는 streamer의 기존 멱등 테스트가 덮는다.
+  - `PurchaseActivityHandlerTest.sameEventTwiceIsNoOp`: 같은 eventId가 다른 offset으로 다시 오면 `ALREADY_PROCESSED`이고 구매 활동은 그대로다.
+  - `PurchaseActivityRedeliveryTest`: 같은 record가 재전달돼도 no-op이다.
+- 대사의 누락 정의는 `processed_order_confirmation`에 없는 주문이다. 따라서 이미 소비된 주문은 보통 명령 대상이 아니다. 다만 겹침 구간이나 send 실패 뒤 재실행에서는 같은 명령이 다시 나갈 수 있다.
+
+### 남는 한계
+
+- 사례 A 상태가 생긴 뒤 다음 대사 실행까지는 구매 활동에 빠져 있다. 지연은 최대 대사 주기 + 유예 5분이다.
+- 대사는 확정 시각 구간만 본다. 워터마크보다 겹침 1분 넘게 늦게 commit된 확정은 찾지 못한다. 과거 구간 재훑기는 범위 밖이다.
