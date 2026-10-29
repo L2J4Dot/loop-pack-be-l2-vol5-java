@@ -1,5 +1,7 @@
 package com.loopers.interfaces.api.order;
 
+import com.loopers.application.order.OrderConfirmedPayload;
+import com.loopers.infrastructure.order.OrderConfirmedMessageSerializer;
 import com.loopers.infrastructure.payment.TestPgServer.CreateBehavior;
 import com.loopers.interfaces.consumer.RepublishRequestsListener;
 import com.loopers.support.kafka.OrderEventsProbe;
@@ -87,6 +89,30 @@ class OrderEventRepublishIntegrationTest extends OrderEventsIntegrationSupport {
         ConsumerRecord<String, String> republished = published.get(1);
         assertThat(republished.key()).isEqualTo(first.key());
         assertThat(OrderEventsProbe.json(republished)).isEqualTo(OrderEventsProbe.json(first));
+    }
+
+    @Test
+    @DisplayName("사례 A 복구(실험 ④): commit 뒤 send 직전에 멈춰 broker에 없던 확정을 대사 명령으로 재발행하면 처음 발행됐어야 할 payload 그대로 1건이 나간다")
+    void caseAIsRecoveredByRepublishRequest() throws Exception {
+        long orderId = newOrder();
+        server.createBehavior(CreateBehavior.ACCEPT_SUCCESS);
+        publisher.haltBeforeSend();
+        confirm(orderId, UUID.randomUUID().toString()).andExpect(status().isOk());
+        OrderConfirmedPayload halted = publisher.halted().getFirst();
+        publisher.reset();
+
+        long n = request(orderId);
+
+        awaitCommitted(n + 1);
+        ConsumerRecord<String, String> recovered = probe.awaitEvent(from, eventId(orderId));
+        assertThat(recovered.key()).isEqualTo(halted.key());
+        assertThat(OrderEventsProbe.json(recovered))
+            .isEqualTo(OrderEventsProbe.json(OrderConfirmedMessageSerializer.serialize(halted)));
+        assertThat(probe.awaitEvents(from, eventId(orderId), 1)).hasSize(1);
+        System.out.println("[실험④ 3b 사례 A 복구·api] orderId=" + orderId + ", eventId=" + halted.eventId()
+            + ", 명령 record=(topic=" + REQUEST_TOPIC + ", partition=0, offset=" + n + ") → committed=" + committed()
+            + ", OrderConfirmed record=(topic=" + recovered.topic() + ", partition=" + recovered.partition() + ", offset="
+            + recovered.offset() + ", key=" + recovered.key() + "), value=" + recovered.value());
     }
 
     @Test

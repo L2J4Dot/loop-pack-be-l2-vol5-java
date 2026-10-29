@@ -195,6 +195,23 @@ class OrderEventReconcileJobTest {
     }
 
     @Test
+    @DisplayName("사례 A 복구(실험 ④): 확정됐지만 OrderConfirmed가 소비되지 않은 주문 1(2026-10-29T01:00:00Z 확정)을 다음 대사가 찾아 명령 1건을 보낸다")
+    void caseAMissingConfirmationIsRequested() throws Exception {
+        long caseA = order("CONFIRMED", NOW);
+        clock.set(NOW.plus(Duration.ofMinutes(10)));
+        long from = probe.mark();
+
+        JobExecution execution = run();
+
+        List<ConsumerRecord<String, String>> commands = probe.readFrom(from);
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(commands).singleElement().satisfies(command -> assertThat(command.key()).isEqualTo(String.valueOf(caseA)));
+        System.out.println("[실험④ 3b 사례 A 복구·batch] orderId=" + caseA + ", 명령 record=(topic=" + commands.get(0).topic()
+            + ", partition=" + commands.get(0).partition() + ", offset=" + commands.get(0).offset() + ", key="
+            + commands.get(0).key() + "), value=" + commands.get(0).value() + ", 워터마크=" + watermark());
+    }
+
+    @Test
     @DisplayName("누락 주문 조회는 orders의 (status, confirmed_at) 인덱스로 구간을 고른다")
     void missingOrderQueryUsesStatusConfirmedAtIndex() {
         for (int minute = 1; minute <= 30; minute++) {
