@@ -11,12 +11,18 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.kafka.common.KafkaException;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.context.event.EventListener;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
 
 // 주문 확정 이벤트 통합 테스트 전용 대역. 운영 코드에는 분기를 두지 않고 여기서 바꿔 끼운다.
 @TestConfiguration
@@ -26,6 +32,13 @@ public class OrderEventsTestConfig {
     ControllableOrderConfirmedPublisher controllableOrderConfirmedPublisher(
         KafkaOrderConfirmedPublisher kafkaOrderConfirmedPublisher) {
         return new ControllableOrderConfirmedPublisher(kafkaOrderConfirmedPublisher);
+    }
+
+    @Bean
+    @Primary
+    FailingKafkaTemplate failingKafkaTemplate(
+        @Qualifier("orderEventsKafkaTemplate") KafkaTemplate<String, String> orderEventsKafkaTemplate) {
+        return new FailingKafkaTemplate(orderEventsKafkaTemplate);
     }
 
     @Bean
@@ -77,6 +90,32 @@ public class OrderEventsTestConfig {
             }
             sent.add(payload);
             delegate.send(payload);
+        }
+    }
+
+    // 실제 producer factory로 보내다가, 무장하면 send를 실패시킨다. 운영 publisher의 실패 처리(로그·지표)는 그대로 거친다.
+    public static class FailingKafkaTemplate extends KafkaTemplate<String, String> {
+        public static final String INJECTED_FAILURE = "주입된 Kafka send 실패";
+
+        public enum Failure { NONE, SYNC_THROW, ASYNC_FAILED }
+
+        private final AtomicReference<Failure> failure = new AtomicReference<Failure>(Failure.NONE);
+
+        FailingKafkaTemplate(KafkaTemplate<String, String> delegate) {
+            super(delegate.getProducerFactory());
+        }
+
+        public void fail(Failure next) {
+            failure.set(next);
+        }
+
+        @Override
+        public CompletableFuture<SendResult<String, String>> send(String topic, String key, String data) {
+            return switch (failure.get()) {
+                case SYNC_THROW -> throw new KafkaException(INJECTED_FAILURE);
+                case ASYNC_FAILED -> CompletableFuture.failedFuture(new KafkaException(INJECTED_FAILURE));
+                case NONE -> super.send(topic, key, data);
+            };
         }
     }
 
