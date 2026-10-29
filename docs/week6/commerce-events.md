@@ -961,15 +961,35 @@ PG 취소 API 연동(늦은 성공의 자동 환불), 다중 서버 선점, 실�
 
 - Kafka 테스트 broker는 `modules/kafka` testFixtures의 `KafkaTestContainersConfig`가 띄운다. 컨테이너의 `getBootstrapServers()` 값 하나를 `spring.kafka.bootstrap-servers`와 admin `bootstrap.servers`에 함께 주입한다.
 - `kafka.yml`의 consumer는 `value-deserializer`와 Spring Boot 속성 `spring.kafka.consumer.enable-auto-commit: false`를 쓴다.
-- 이벤트 소비는 기존 batch 팩토리와 별도인 record listener 팩토리(`KafkaConfig.RECORD_LISTENER`)를 쓴다: batch listener 끔, concurrency 1, ack mode `MANUAL_IMMEDIATE`, error handler 기본 후보 `CommonContainerStoppingErrorHandler`(정책 자체는 아래 미결).
+- 이벤트 소비는 기존 batch 팩토리와 별도인 record listener 팩토리(`KafkaConfig.RECORD_LISTENER`)를 쓴다: batch listener 끔, concurrency 1, ack mode `MANUAL_IMMEDIATE`, error handler는 아래 "소비 실패 정책"을 따른다.
 - record 팩토리는 batch 팩토리의 `fetch.min.bytes=1MiB`·`fetch.max.wait.ms=5000`을 물려받지 않고 Kafka 기본 fetch 대기(1 byte·500ms)를 쓴다. 이벤트를 한 건씩 바로 처리해야 하고, 테스트가 poll마다 최대 5초씩 기다리지 않게 하기 위해서다.
 - 배정·재전달 학습 실험은 업무 topic과 섞지 않도록 테스트마다 고유 topic·group으로 실제 broker에서 순수 Kafka 클라이언트로 한다.
+
+### 구매 활동 저장 [확정] (D67)
+
+- 테이블 두 개를 한 DB 트랜잭션으로 commit하고, commit이 성공한 뒤에만 ack한다.
+  - `processed_order_confirmation`: 이벤트 단위 영수증. `event_id` 유일, `order_id` 유일, 정규화한 내용 지문(`payload_fingerprint`).
+  - `product_purchase_activity`: 품목 단위. (`order_id`, `product_id`) 유일, `quantity`, `confirmed_at`.
+- 내용 지문은 `eventId`·`orderId`·`confirmedAt`(UTC Instant)·`items`(productId 오름차순)만으로 만든다. JSON 속성 순서·items 순서·모르는 필드는 지문에 영향을 주지 않는다.
+- 같은 eventId·같은 지문이 다시 오면 아무것도 하지 않는다(정상 재전달).
+- 조회만으로 동시 소비 경쟁을 막을 수 없으므로 유일 제약이 최종 방어선이다. 유일 제약 위반이 나면 그 트랜잭션은 rollback하고 새 트랜잭션에서 기존 완료 기록과 다시 비교한다. 유일 제약 외의 DB 오류는 중복으로 바꾸지 않는다(일시적 실패).
+- 과거 주문의 productId는 사실의 식별자로 저장한다. 상품 테이블 존재·현재 가격을 조회하지 않는다.
+
+### 소비 실패 정책 [확정] (D68~D70)
+
+| 상황 | 처리 |
+| --- | --- |
+| 같은 eventId인데 내용이 다름 / 같은 orderId인데 eventId가 다름 (D68) | 구매 활동을 추가하지 않고 이상 기록(`order_event_anomaly`) 후 정상 ack. 충돌은 처리 실패가 아니라 처리 결과다 |
+| DB 저장 실패 등 일시적 실패, 이상 기록 저장 실패 포함 (D69) | 1초 간격 3회 재시도. 그래도 실패하면 건너뛰지 않고 컨테이너를 멈춘다. 그 offset은 commit하지 않는다. 재시도 총시간은 `max.poll.interval.ms`보다 충분히 짧게 둔다 |
+| 처음 보는 `schemaVersion` (D70) | 재시도 없이 바로 멈춘다. 받는 쪽을 고쳐 배포·재시작하면 같은 record부터 처리된다. 모르는 버전 도착은 배포 순서 실수·계약 위반의 신호다 |
+| 모르는 필드 (D70) | 무시한다. 필드 추가는 호환되는 변경이다 |
+| 깨진 JSON, 필수 필드 누락, key와 payload orderId 불일치, 수량 0 이하, items 안 같은 상품 중복 (D70) | record 내용 자체가 틀려 고칠 수 없으므로 충돌과 같이 이상 기록 후 ack |
+
+- `order_event_anomaly`는 (`topic`, `partition_no`, `offset_no`) 유일이다. 같은 record가 재전달돼도 이상 행은 하나다.
 
 ### 아직 정하지 않은 것 [미결]
 
 - 발행 위치(어느 트랜잭션 경계·계층에서 보내는가)
 - `confirmedAt` 저장 위치
 - `eventId` 생성 방식
-- 소비 쪽 테이블 설계와 중복·충돌 판단
-- record listener error handler 정책
 - 발행 결과 대기 방식(동기 대기 여부·timeout)
