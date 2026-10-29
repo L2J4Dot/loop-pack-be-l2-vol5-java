@@ -33,6 +33,7 @@ import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -53,12 +54,13 @@ public class OrderApplicationService {
     private final PaymentLookupScheduleRepository paymentLookupScheduleRepository;
     private final PaymentLookupPolicy paymentLookupPolicy;
     private final PaymentExpiryPolicy paymentExpiryPolicy;
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     public OrderApplicationService(OrderRepository orderRepository, ProductRepository productRepository,
         PaymentRecordRepository paymentRecordRepository, PaymentGatewayRegistry paymentGatewayRegistry,
         TransactionTemplate transactionTemplate, PaymentAnomalyRepository paymentAnomalyRepository, Clock clock,
         PaymentLookupScheduleRepository paymentLookupScheduleRepository, PaymentLookupPolicy paymentLookupPolicy,
-        PaymentExpiryPolicy paymentExpiryPolicy) {
+        PaymentExpiryPolicy paymentExpiryPolicy, ApplicationEventPublisher applicationEventPublisher) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
         this.paymentRecordRepository = paymentRecordRepository;
@@ -69,6 +71,7 @@ public class OrderApplicationService {
         this.paymentLookupScheduleRepository = paymentLookupScheduleRepository;
         this.paymentLookupPolicy = paymentLookupPolicy;
         this.paymentExpiryPolicy = paymentExpiryPolicy;
+        this.applicationEventPublisher = applicationEventPublisher;
     }
 
     public record ItemRequest(long productId, int quantity) { }
@@ -352,7 +355,11 @@ public class OrderApplicationService {
                 if (order.getStatus() == Order.Status.PAYMENT_FAILED) {
                     returnReservedStock(order);
                 }
-                orderRepository.save(order);
+                Order saved = orderRepository.save(order);
+                if (saved.getStatus() == Order.Status.CONFIRMED) {
+                    // 최초 확정 순간이다. payload는 이 트랜잭션 안에서 저장된 주문으로 만들고, send는 commit 뒤 listener가 한다(설계 27절 D72).
+                    applicationEventPublisher.publishEvent(OrderConfirmedPayloadFactory.create(saved));
+                }
                 payment.applyProviderReport(report.status(), report.transactionKey());
                 payment = paymentRecordRepository.save(payment);
                 paymentAnomalyRepository.resolveTransient(order.getId(), clock.instant());

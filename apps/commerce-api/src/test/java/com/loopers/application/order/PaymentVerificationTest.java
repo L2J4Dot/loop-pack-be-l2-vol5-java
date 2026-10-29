@@ -75,7 +75,7 @@ class PaymentVerificationTest {
             new PaymentGatewayRegistry(List.of(gateway), List.of("fake")), new TransactionTemplate(new LocalTransactions()),
             anomalies, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), mock(PaymentLookupScheduleRepository.class),
             new PaymentLookupPolicy(new LookupBackoff(Duration.ofSeconds(5), 2, Duration.ofMinutes(1)), maximum -> maximum, 12, 100),
-            new PaymentExpiryPolicy(Duration.ofMinutes(2)));
+            new PaymentExpiryPolicy(Duration.ofMinutes(2)), event -> { });
         clearInvocations(gateway);
     }
 
