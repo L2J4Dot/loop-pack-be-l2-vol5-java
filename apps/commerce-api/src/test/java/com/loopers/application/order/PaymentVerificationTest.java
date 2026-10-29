@@ -64,7 +64,7 @@ class PaymentVerificationTest {
         gateway = mock(PaymentGateway.class);
         when(gateway.providerId()).thenReturn("fake");
         order = Order.restore(42, 1, List.of(new OrderItem(new ProductId(1), new Quantity(2), new Money(1000))),
-            Order.Status.PAYMENT_PENDING);
+            Order.Status.PAYMENT_PENDING, null);
         payment = PaymentRecord.pgStarted(42, new Money(2000), "attempt", "fake", STARTED_AT);
         when(orders.findById(42)).thenReturn(Optional.of(order));
         when(orders.findByIdForUpdate(42)).thenReturn(Optional.of(order));

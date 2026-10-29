@@ -3,6 +3,7 @@ package com.loopers.domain.order;
 import com.loopers.domain.common.InvalidValueException;
 import com.loopers.domain.common.Money;
 import com.loopers.domain.common.RuleViolationException;
+import java.time.Instant;
 import java.util.List;
 
 public final class Order {
@@ -17,8 +18,9 @@ public final class Order {
     private final List<OrderItem> items;
     private final Money total;
     private Status status;
+    private Instant confirmedAt;
 
-    private Order(Long id, long userId, List<OrderItem> items, Status status) {
+    private Order(Long id, long userId, List<OrderItem> items, Status status, Instant confirmedAt) {
         if (items == null || items.isEmpty() || items.size() > 100) {
             throw new InvalidValueException("주문 품목은 1~100개여야 합니다.");
         }
@@ -33,11 +35,11 @@ public final class Order {
     }
 
     public static Order create(long userId, List<OrderItem> items) {
-        return new Order(null, userId, items, Status.DRAFT);
+        return new Order(null, userId, items, Status.DRAFT, null);
     }
 
-    public static Order restore(long id, long userId, List<OrderItem> items, Status status) {
-        return new Order(id, userId, items, status);
+    public static Order restore(long id, long userId, List<OrderItem> items, Status status, Instant confirmedAt) {
+        return new Order(id, userId, items, status, confirmedAt);
     }
 
     public void requireDraft() {
@@ -53,7 +55,7 @@ public final class Order {
 
     // 결제 대기만 결과로 바뀐다. 종결된 주문은 늦게 온 반대 결과로 덮어쓰지 않고 충돌로 알린다(설계 23절 상태 전이 표).
     // 만료 뒤 늦게 온 성공도 충돌이다. 재고는 이미 반환했으므로 사람이 환불한다(설계 26절).
-    public PaymentTransition applyPaymentOutcome(PaymentOutcome outcome) {
+    public PaymentTransition applyPaymentOutcome(PaymentOutcome outcome, Instant now) {
         return switch (status) {
             case DRAFT -> PaymentTransition.ANOMALY;
             case PAYMENT_PENDING -> switch (outcome) {
@@ -100,5 +102,9 @@ public final class Order {
 
     public Status getStatus() {
         return status;
+    }
+
+    public Instant getConfirmedAt() {
+        return confirmedAt;
     }
 }

@@ -346,7 +346,7 @@ public class OrderApplicationService {
             && (!source.canResolveReview() || report.outcome() == Order.PaymentOutcome.UNKNOWN)) {
             return OrderResult.from(order, found);
         }
-        Order.PaymentTransition transition = order.applyPaymentOutcome(report.outcome());
+        Order.PaymentTransition transition = order.applyPaymentOutcome(report.outcome(), clock.instant());
         switch (transition) {
             case CHANGED -> {
                 if (order.getStatus() == Order.Status.PAYMENT_FAILED) {
