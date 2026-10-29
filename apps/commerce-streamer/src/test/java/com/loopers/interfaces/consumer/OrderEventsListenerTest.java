@@ -1,17 +1,25 @@
 package com.loopers.interfaces.consumer;
 
+import com.loopers.confg.kafka.KafkaConfig;
 import com.loopers.support.PurchaseActivityTables;
 import com.loopers.utils.DatabaseCleanUp;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
 import java.util.UUID;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
+import org.springframework.kafka.listener.AbstractMessageListenerContainer;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -28,6 +36,10 @@ class OrderEventsListenerTest {
 
     @Autowired
     private KafkaListenerEndpointRegistry kafkaListenerEndpointRegistry;
+
+    @Autowired
+    @Qualifier(KafkaConfig.RECORD_LISTENER)
+    private ConcurrentKafkaListenerContainerFactory<Object, Object> recordListenerContainerFactory;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -54,6 +66,22 @@ class OrderEventsListenerTest {
     void tearDown() {
         fixture.close();
         databaseCleanUp.truncateAllTables();
+    }
+
+    @DisplayName("purchase-activity listener의 consumer는 auto.offset.reset=earliest로 만들어지고 공통 consumer 기본값 latest는 그대로다")
+    @Test
+    void purchaseActivityConsumerStartsFromEarliest() {
+        Map<String, Object> commonConfig = recordListenerContainerFactory.getConsumerFactory().getConfigurationProperties();
+        AbstractMessageListenerContainer<?, ?> container =
+            (AbstractMessageListenerContainer<?, ?>) kafkaListenerEndpointRegistry.getListenerContainer(OrderEventsListener.LISTENER_ID);
+        Properties listenerOverrides = container.getContainerProperties().getKafkaConsumerProperties();
+
+        // 컨테이너는 consumer factory 설정 위에 listener 속성을 덮어써 KafkaConsumer를 만든다(DefaultKafkaConsumerFactory와 같은 순서).
+        Map<String, Object> listenerConfig = new HashMap<String, Object>(commonConfig);
+        listenerOverrides.stringPropertyNames().forEach(name -> listenerConfig.put(name, listenerOverrides.getProperty(name)));
+
+        assertThat(new ConsumerConfig(listenerConfig).getString(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG)).isEqualTo("earliest");
+        assertThat(new ConsumerConfig(commonConfig).getString(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG)).isEqualTo("latest");
     }
 
     @DisplayName("정상 이벤트 1건을 보내면 구매 활동이 저장되고 group committed offset이 n+1이 된다")
