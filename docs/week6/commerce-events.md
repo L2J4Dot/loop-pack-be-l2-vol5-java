@@ -989,9 +989,19 @@ PG 취소 API 연동(늦은 성공의 자동 환불), 다중 서버 선점, 실�
 - `order_event_anomaly`는 (`topic`, `partition_no`, `offset_no`) 유일이다. 같은 record가 재전달돼도 이상 행은 하나다.
 - `purchase-activity` group만 `auto.offset.reset=earliest`를 쓴다(공통 `kafka.yml` 기본값 `latest`는 유지). committed offset이 없을 때(첫 배포, retention으로 offset이 유효하지 않을 때) 그 전에 쌓인 OrderConfirmed를 건너뛰면 구매 활동이 영구 누락되고, earliest로 생기는 재처리는 완료 기록과 유일 제약의 멱등 소비가 no-op으로 흡수한다. (2026-10-29 사용자 승인)
 
-### 아직 정하지 않은 것 [미결]
+### 발행 [확정] (D72·D78·D79·D80, 2026-10-29 사용자 결정)
 
-- 발행 위치(어느 트랜잭션 경계·계층에서 보내는가)
-- `confirmedAt` 저장 위치
-- `eventId` 생성 방식
-- 발행 결과 대기 방식(동기 대기 여부·timeout)
+- **발행 위치(D72):** 결과 반영 경계(`applyLocked`)의 `CHANGED` 분기에서 바뀐 상태가 `CONFIRMED`일 때, 즉 최초 확정 순간에 같은 트랜잭션 안에서 저장된 주문으로 payload를 만들어 Spring application event로 발행한다. 별도 Bean의 `@TransactionalEventListener(phase = AFTER_COMMIT)`가 Kafka로 send한다. rollback이면 listener가 실행되지 않는다. listener 시점에 주문을 다시 읽지 않고(lazy 로딩 금지), listener 안에서 DB에 쓰지 않는다.
+- **confirmedAt(D78):** 주문(`orders.confirmed_at`)에 저장한다. 주문 도메인이 처음 `CONFIRMED`로 바뀔 때 주입한 `Clock`으로 한 번만 기록하고 이후 바꾸지 않는다(중복 callback·재조회가 바꾸지 못함). 이미 `CONFIRMED`인 옛 주문(과거 포인트 결제, 이전 PG 확정)은 null로 두고 소급 발행하지 않는다. ddl-auto를 쓰지 않는 환경은 배포 전에 `src/main/resources/sql/add-order-confirmed-at.sql`을 실행한다(열·인덱스 `(status, confirmed_at)`이 없을 때만 추가, 다시 실행해도 안전, 값을 채우지 않음). 주문 조회 응답에는 노출하지 않는다(기존 API 계약 유지).
+- **confirmedAt 정밀도 [임시]:** 밀리초로 자른다. 같은 확정을 저장된 주문에서 다시 만들어도(3b 재발행) payload가 같아야 하는데, 시스템 Clock의 나노초는 DB `DATETIME(6)`에 반올림되어 들어가 메모리 값과 달라질 수 있기 때문이다.
+- **eventId(D79):** `order-confirmed:v1:{orderId}`. 전제: 주문은 한 번만 `CONFIRMED`가 된다(종결 상태, 결제 기록 주문당 하나). 같은 주문의 재확정 기능이 생기면 `v2` + 시도 번호로 규칙을 바꾼다.
+- **payload 생성은 한 곳:** 저장된 주문(주문 ID, confirmedAt, 품목)만 입력으로 받는다. 같은 상품은 합산하고 items는 productId 오름차순이다. record key는 `String.valueOf(orderId)`. 카드 정보·PG 비밀·사용자 개인정보를 넣지 않고 상품 행·현재 가격을 조회하지 않는다. 3b 재발행도 같은 생성 코드를 쓴다.
+- **발행 결과 대기(D80):** send는 기다리지 않는다(비동기). 성공이면 callback에서 (topic, partition, offset)을 INFO 로그로, 실패면 ERROR 로그와 실패 지표로 드러낸다. 놓친 발행은 3b 대사가 재발행한다.
+- **send 실패해도 주문은 그대로:** 확정 응답은 저장된 주문 결과로 하고, 발행 실패 때문에 주문을 실패·미확인으로 되돌리거나 PG를 다시 부르지 않는다.
+- **producer 보장:** `acks=all`, `enable.idempotence=true`를 명시한다(kafka-clients 3.8 기본값과 같지만 공통 설정이 바뀌어도 유지되게). 값 직렬화는 문자열(JSON)이며 공통 producer(`JsonSerializer`)와 분리한 주문 이벤트 전용 producer를 쓴다. 단일 broker라 복제 장애 내구성(`min.insync.replicas`)은 증명하지 못한다.
+- **`max.block.ms` [임시]:** 2초(`commerce.kafka.producer.max-block`). broker 장애 때 metadata 대기로 요청 스레드가 오래 묶이지 않게 한다.
+- **topic 선언 [임시]:** commerce-api가 `order-events`를 `NewTopic`으로 선언한다(없을 때만 생성). partition 3(`commerce.kafka.topics.order-events-partitions`), replication 1. broker 자동 생성에 맡기면 partition 수가 broker 설정에 따라 달라지고, partition 수를 나중에 늘리면 key → partition 배치가 바뀌어 같은 주문 순서 보장 범위가 흔들리므로 처음부터 소비자를 3개까지 늘릴 수 있는 값으로 둔다. replication 1은 로컬 단일 broker 기준이며 운영 복제 수는 범위 밖이다. 테스트는 고유 접미사 topic을 같은 선언으로 만든다.
+
+### 3b로 넘긴 것 [확정, 구현은 3b] (D73~D77)
+
+- 놓친 발행의 대사: commerce-batch 대사, 재발행 명령 topic, commerce-api의 재발행 명령 consumer. 대사는 `(status, confirmed_at)` 인덱스로 확정 주문을 범위로 고르고, 재발행은 위 payload 생성 코드를 그대로 쓴다. 세부 규칙은 3b에서 이 절에 반영한다.
