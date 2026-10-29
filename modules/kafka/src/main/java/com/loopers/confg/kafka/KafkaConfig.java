@@ -9,10 +9,10 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.EnableKafka;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
-import org.springframework.kafka.listener.CommonContainerStoppingErrorHandler;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.support.converter.BatchMessagingMessageConverter;
 import org.springframework.kafka.support.converter.ByteArrayJsonMessageConverter;
+import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -84,8 +84,9 @@ public class KafkaConfig {
         ConcurrentKafkaListenerContainerFactory<Object, Object> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-        // error handler 정책은 설계 문서 27절 [미결]. 실패 record를 건너뛰지 않도록 멈추는 쪽을 기본 후보로 둔다.
-        factory.setCommonErrorHandler(new CommonContainerStoppingErrorHandler());
+        // 재시도 총시간(약 3초)은 max.poll.interval.ms(Kafka 기본 5분)보다 충분히 짧아야 재시도 중 group에서 빠지지 않는다.
+        factory.setCommonErrorHandler(
+            new RetryThenStopErrorHandler(new FixedBackOff(RECORD_RETRY_INTERVAL_MS, RECORD_RETRY_ATTEMPTS)));
         factory.setConcurrency(1);
         factory.setBatchListener(false);
         return factory;
