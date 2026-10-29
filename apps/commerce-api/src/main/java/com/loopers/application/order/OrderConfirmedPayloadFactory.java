@@ -1,7 +1,6 @@
 package com.loopers.application.order;
 
 import com.loopers.domain.order.Order;
-import com.loopers.domain.order.OrderItem;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
