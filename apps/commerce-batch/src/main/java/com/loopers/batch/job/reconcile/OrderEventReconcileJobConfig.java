@@ -2,16 +2,14 @@ package com.loopers.batch.job.reconcile;
 
 import com.loopers.batch.listener.JobListener;
 import com.loopers.batch.listener.StepMonitorListener;
+import com.loopers.confg.kafka.KafkaConfig;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import javax.sql.DataSource;
-import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.JobScope;
@@ -33,6 +31,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.transaction.PlatformTransactionManager;
 
 // 실행마다 Job 한 번. 주기는 바깥 스케줄러가 정하고 "지금 바로 보기"도 같은 Job 실행이다(설계 27절).
@@ -130,14 +129,16 @@ public class OrderEventReconcileJobConfig {
     }
 
     // 명령은 이미 만든 JSON 문자열이라 공통 producer(JsonSerializer)와 분리한다. 같은 명령이 두 번 쓰이지 않게 idempotence를 켠다.
+    // factory를 Bean으로 두어 컨텍스트 종료 때 Spring이 producer를 닫게 한다.
     @Bean
-    public KafkaTemplate<String, String> republishCommandKafkaTemplate(KafkaProperties kafkaProperties) {
-        Map<String, Object> props = new HashMap<>(kafkaProperties.buildProducerProperties(null));
-        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        props.put(ProducerConfig.ACKS_CONFIG, "all");
-        props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
-        return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(props));
+    public ProducerFactory<String, String> republishCommandProducerFactory(KafkaProperties kafkaProperties) {
+        return new DefaultKafkaProducerFactory<>(KafkaConfig.stringProducerProperties(kafkaProperties));
+    }
+
+    @Bean
+    public KafkaTemplate<String, String> republishCommandKafkaTemplate(
+        ProducerFactory<String, String> republishCommandProducerFactory) {
+        return new KafkaTemplate<>(republishCommandProducerFactory);
     }
 
     private static Map<String, Object> windowParameters(ReconcileWindow window) {

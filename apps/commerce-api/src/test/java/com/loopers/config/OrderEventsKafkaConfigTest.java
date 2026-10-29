@@ -30,19 +30,20 @@ class OrderEventsKafkaConfigTest {
             "commerce.kafka.topics.order-event-republish-requests-partitions=1");
 
     // Kafka producer는 만들 때 app-info MBean을 등록하고 close할 때 해제한다. broker 연결 없이 실제 producer가 닫혔는지 본다.
+    // 전제 단언이나 producer 생성이 실패해도 열린 producer가 남지 않게 정리를 바깥 finally에 둔다.
     @Test
     @DisplayName("컨텍스트를 닫으면 주문 이벤트용 producer factory가 정리되어 그 factory가 만든 Kafka producer가 닫힌다")
     void closesOrderEventsProducerOnContextClose() throws Exception {
         AtomicReference<ProducerFactory<?, ?>> producerFactory = new AtomicReference<ProducerFactory<?, ?>>();
         AtomicReference<ObjectName> appInfo = new AtomicReference<ObjectName>();
-        contextRunner.run(context -> {
-            KafkaTemplate<?, ?> template = context.getBean("orderEventsKafkaTemplate", KafkaTemplate.class);
-            producerFactory.set(template.getProducerFactory());
-            appInfo.set(appInfoName(producerFactory.get().createProducer()));
-            assertThat(isRegistered(appInfo.get())).as("context를 닫기 전에는 producer가 열려 있다").isTrue();
-        });
-
         try {
+            contextRunner.run(context -> {
+                KafkaTemplate<?, ?> template = context.getBean("orderEventsKafkaTemplate", KafkaTemplate.class);
+                producerFactory.set(template.getProducerFactory());
+                appInfo.set(appInfoName(producerFactory.get().createProducer()));
+                assertThat(isRegistered(appInfo.get())).as("context를 닫기 전에는 producer가 열려 있다").isTrue();
+            });
+
             assertThat(isRegistered(appInfo.get())).as("context를 닫은 뒤 주문 이벤트 producer가 닫혔는가").isFalse();
         } finally {
             if (producerFactory.get() instanceof DefaultKafkaProducerFactory<?, ?> leftOpen) {
