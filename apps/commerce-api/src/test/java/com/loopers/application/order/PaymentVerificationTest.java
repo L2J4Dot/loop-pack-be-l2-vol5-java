@@ -1,5 +1,6 @@
 package com.loopers.application.order;
 
+import com.loopers.application.order.port.OrderConfirmedOutbox;
 import com.loopers.application.order.port.OrderConfirmedPublisher;
 import com.loopers.application.order.port.OrderRepository;
 import com.loopers.application.payment.PaymentExpiryPolicy;
@@ -77,7 +78,7 @@ class PaymentVerificationTest {
             anomalies, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), mock(PaymentLookupScheduleRepository.class),
             new PaymentLookupPolicy(new LookupBackoff(Duration.ofSeconds(5), 2, Duration.ofMinutes(1)), maximum -> maximum, 12, 100),
             new PaymentExpiryPolicy(Duration.ofMinutes(2)), event -> { },
-            mock(OrderConfirmedPublisher.class));
+            mock(OrderConfirmedPublisher.class), mock(OrderConfirmedOutbox.class));
         clearInvocations(gateway);
     }
 

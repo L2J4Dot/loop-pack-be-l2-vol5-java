@@ -1,6 +1,7 @@
 package com.loopers.architecture;
 
 import com.loopers.application.order.PaymentLookupAssessment;
+import com.loopers.application.order.port.OrderConfirmedOutbox;
 import com.loopers.application.payment.PaymentGatewayRegistry;
 import com.loopers.application.payment.PaymentLookupPolicy;
 import com.loopers.application.payment.port.PaymentAnomalyRepository;
@@ -10,6 +11,8 @@ import com.loopers.application.payment.port.PaymentLookupScheduleRepository;
 import com.loopers.application.payment.port.PaymentTransactionsLookup;
 import com.loopers.domain.payment.LookupBackoff;
 import com.loopers.domain.payment.PaymentRecord;
+import com.loopers.infrastructure.order.OrderConfirmedOutboxJpaEntity;
+import com.loopers.infrastructure.order.OrderConfirmedOutboxPersistenceAdapter;
 import com.loopers.infrastructure.payment.CircuitBreakingPaymentGateway;
 import com.loopers.infrastructure.payment.PaymentAnomalyJpaEntity;
 import com.loopers.infrastructure.payment.PaymentAnomalyPersistenceAdapter;
@@ -108,6 +111,17 @@ class ArchitectureTest {
         assertThat(infrastructure.contain(CircuitBreakingPaymentGateway.class)).isTrue();
         assertThat(infrastructure.contain(PaymentCircuitBreakers.class)).isTrue();
         assertThat(application.contain(PaymentTransactionsLookup.NotCalled.class)).isTrue();
+    }
+
+    @Test
+    @DisplayName("주문 확정 Outbox 포트는 애플리케이션에, 어댑터·엔티티는 인프라에 있어 계층 검사 대상에 포함된다")
+    void orderOutboxClassesAreChecked() {
+        var application = CLASSES.that(resideInAPackage("..application.."));
+        var infrastructure = CLASSES.that(resideInAPackage("..infrastructure.."));
+
+        assertThat(application.contain(OrderConfirmedOutbox.class)).isTrue();
+        assertThat(infrastructure.contain(OrderConfirmedOutboxPersistenceAdapter.class)).isTrue();
+        assertThat(infrastructure.contain(OrderConfirmedOutboxJpaEntity.class)).isTrue();
     }
 
     private static boolean isLegacyExample(String packageName) {
